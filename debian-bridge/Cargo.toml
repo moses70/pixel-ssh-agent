@@ -2,8 +2,13 @@
 name = "pixel-ssh-agent-bridge"
 version = "0.1.0"
 edition = "2021"
+authors = ["Reinhard Moosauer <moses70>"]
 description = "Encrypted PSA1 reverse-tunnel bridge exposing Android Pixel SSH Agent via SSH_AUTH_SOCK in Debian VM"
 license = "MIT"
+repository = "https://github.com/moses70/pixel-ssh-agent"
+readme = "../README.md"
+keywords = ["ssh", "ssh-agent", "android", "pixel", "avf"]
+categories = ["command-line-utilities", "cryptography", "network-programming"]
 
 [dependencies]
 aes-gcm = "0.10"

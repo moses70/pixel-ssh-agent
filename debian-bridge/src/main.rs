@@ -268,7 +268,9 @@ fn cmd_test_live(args: &[String]) -> std::io::Result<()> {
                 i += 1;
                 port = args
                     .get(i)
-                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "--port requires a value"))?
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "--port requires a value")
+                    })?
                     .parse()
                     .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid port"))?;
             }
@@ -276,16 +278,17 @@ fn cmd_test_live(args: &[String]) -> std::io::Result<()> {
                 i += 1;
                 psk_arg = Some(
                     args.get(i)
-                        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "--psk requires a value"))?
+                        .ok_or_else(|| {
+                            io::Error::new(io::ErrorKind::InvalidInput, "--psk requires a value")
+                        })?
                         .clone(),
                 );
             }
             "--config" => {
                 i += 1;
-                config_path = Some(PathBuf::from(
-                    args.get(i)
-                        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "--config requires a value"))?,
-                ));
+                config_path = Some(PathBuf::from(args.get(i).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "--config requires a value")
+                })?));
             }
             other => {
                 return Err(io::Error::new(
@@ -358,7 +361,10 @@ fn cmd_test_live(args: &[String]) -> std::io::Result<()> {
     if payload.first().copied() != Some(12) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("Expected SSH_AGENT_IDENTITIES_ANSWER (12), got {:?}", payload.first()),
+            format!(
+                "Expected SSH_AGENT_IDENTITIES_ANSWER (12), got {:?}",
+                payload.first()
+            ),
         ));
     }
 
@@ -415,7 +421,8 @@ fn cmd_test_live(args: &[String]) -> std::io::Result<()> {
                 let mut spos = 1usize;
                 let sig_blob = read_ssh_bytes(&sign_payload, &mut spos)?;
                 let mut sbpos = 0usize;
-                let sig_algo = String::from_utf8_lossy(&read_ssh_bytes(&sig_blob, &mut sbpos)?).into_owned();
+                let sig_algo =
+                    String::from_utf8_lossy(&read_ssh_bytes(&sig_blob, &mut sbpos)?).into_owned();
                 let sig_raw = read_ssh_bytes(&sig_blob, &mut sbpos)?;
                 println!(
                     "[test-live] PASS: SIGN_RESPONSE received! algo={sig_algo}, sig_bytes={}",
@@ -423,7 +430,9 @@ fn cmd_test_live(args: &[String]) -> std::io::Result<()> {
                 );
             }
             Some(5) => {
-                println!("[test-live] INFO: Received SSH_AGENT_FAILURE (5) — user denied or timed out.");
+                println!(
+                    "[test-live] INFO: Received SSH_AGENT_FAILURE (5) — user denied or timed out."
+                );
             }
             other => {
                 return Err(io::Error::new(

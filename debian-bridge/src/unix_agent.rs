@@ -35,10 +35,7 @@ pub fn run_unix_agent_server(socket_path: &Path, hub: Arc<BridgeHub>) -> io::Res
 
     let listener = UnixListener::bind(socket_path)?;
     fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600))?;
-    eprintln!(
-        "[bridge] SSH_AUTH_SOCK ready at {}",
-        socket_path.display()
-    );
+    eprintln!("[bridge] SSH_AUTH_SOCK ready at {}", socket_path.display());
 
     for incoming in listener.incoming() {
         match incoming {
@@ -122,7 +119,9 @@ fn handle_ssh_client(mut stream: UnixStream, hub: Arc<BridgeHub>) {
                 break;
             }
             Err(_) => {
-                eprintln!("[bridge] Timed out waiting for Android response on channel #{channel_id}");
+                eprintln!(
+                    "[bridge] Timed out waiting for Android response on channel #{channel_id}"
+                );
                 let _ = stream.write_all(SSH_AGENT_FAILURE_MSG);
                 break;
             }

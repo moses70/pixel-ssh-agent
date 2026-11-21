@@ -71,11 +71,11 @@ pub fn derive_session_keys(
     let mut c2s_key = [0u8; 32];
     let mut s2c_key = [0u8; 32];
     hk.expand(INFO_AUTH, &mut auth_key)
-        .map_err(|_| io::Error::new(io::ErrorKind::Other, "HKDF expand auth failed"))?;
+        .map_err(|_| io::Error::other("HKDF expand auth failed"))?;
     hk.expand(INFO_C2S, &mut c2s_key)
-        .map_err(|_| io::Error::new(io::ErrorKind::Other, "HKDF expand c2s failed"))?;
+        .map_err(|_| io::Error::other("HKDF expand c2s failed"))?;
     hk.expand(INFO_S2C, &mut s2c_key)
-        .map_err(|_| io::Error::new(io::ErrorKind::Other, "HKDF expand s2c failed"))?;
+        .map_err(|_| io::Error::other("HKDF expand s2c failed"))?;
 
     Ok(SessionKeys {
         auth_key,
@@ -104,7 +104,12 @@ pub fn compute_server_mac(
     client_hello: &[u8; CLIENT_HELLO_LEN],
     server_hello_header: &[u8; CLIENT_HELLO_LEN],
 ) -> [u8; 32] {
-    compute_mac(auth_key, LABEL_SERVER_AUTH, client_hello, server_hello_header)
+    compute_mac(
+        auth_key,
+        LABEL_SERVER_AUTH,
+        client_hello,
+        server_hello_header,
+    )
 }
 
 pub fn compute_client_mac(
@@ -112,7 +117,12 @@ pub fn compute_client_mac(
     client_hello: &[u8; CLIENT_HELLO_LEN],
     server_hello_header: &[u8; CLIENT_HELLO_LEN],
 ) -> [u8; 32] {
-    compute_mac(auth_key, LABEL_CLIENT_AUTH, client_hello, server_hello_header)
+    compute_mac(
+        auth_key,
+        LABEL_CLIENT_AUTH,
+        client_hello,
+        server_hello_header,
+    )
 }
 
 fn validate_header(header: &[u8; CLIENT_HELLO_LEN]) -> io::Result<()> {
@@ -214,10 +224,7 @@ impl<W: Write> Psa1Writer<W> {
 
     pub fn write_record(&mut self, plaintext: &[u8]) -> io::Result<()> {
         if self.seq == u64::MAX {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Send sequence counter exhausted",
-            ));
+            return Err(io::Error::other("Send sequence counter exhausted"));
         }
         let ciphertext_len = plaintext
             .len()
@@ -244,7 +251,7 @@ impl<W: Write> Psa1Writer<W> {
                     aad: &aad,
                 },
             )
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "AES-GCM encrypt failed"))?;
+            .map_err(|_| io::Error::other("AES-GCM encrypt failed"))?;
 
         self.inner
             .write_all(&(ciphertext.len() as u32).to_be_bytes())?;
@@ -271,10 +278,7 @@ impl<R: Read> Psa1Reader<R> {
 
     pub fn read_record(&mut self) -> io::Result<Vec<u8>> {
         if self.seq == u64::MAX {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Receive sequence counter exhausted",
-            ));
+            return Err(io::Error::other("Receive sequence counter exhausted"));
         }
         let mut len_buf = [0u8; 4];
         self.inner.read_exact(&mut len_buf)?;
@@ -347,8 +351,9 @@ mod tests {
         let client_hello = build_hello_header(client_pub.as_bytes(), &client_nonce);
         let server_hello_header = build_hello_header(server_pub.as_bytes(), &server_nonce);
 
-        let keys = derive_session_keys(&psk, shared.as_bytes(), &client_hello, &server_hello_header)
-            .unwrap();
+        let keys =
+            derive_session_keys(&psk, shared.as_bytes(), &client_hello, &server_hello_header)
+                .unwrap();
         let server_mac = compute_server_mac(&keys.auth_key, &client_hello, &server_hello_header);
         let client_mac = compute_client_mac(&keys.auth_key, &client_hello, &server_hello_header);
 

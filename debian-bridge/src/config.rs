@@ -34,7 +34,9 @@ impl BridgeConfig {
             }
         }
         let home = env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        PathBuf::from(home).join(".ssh").join("pixel-ssh-agent.sock")
+        PathBuf::from(home)
+            .join(".ssh")
+            .join("pixel-ssh-agent.sock")
     }
 
     pub fn generate_random_psk() -> [u8; 32] {
@@ -48,8 +50,9 @@ impl BridgeConfig {
             .chars()
             .filter(|c| !c.is_whitespace() && *c != ':' && *c != '-')
             .collect();
-        let bytes = hex::decode(&cleaned)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid PSK hex: {e}")))?;
+        let bytes = hex::decode(&cleaned).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid PSK hex: {e}"))
+        })?;
         bytes.try_into().map_err(|v: Vec<u8>| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,

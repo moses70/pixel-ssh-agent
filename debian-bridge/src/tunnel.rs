@@ -233,7 +233,9 @@ fn handle_android_connection(mut stream: TcpStream, psk: [u8; 32], hub: Arc<Brid
     };
 
     hub.set_tunnel(Arc::clone(&tunnel));
-    eprintln!("[bridge] Android SSH Agent authenticated & connected (tunnel #{tunnel_id} from {peer})");
+    eprintln!(
+        "[bridge] Android SSH Agent authenticated & connected (tunnel #{tunnel_id} from {peer})"
+    );
 
     let mut reader = Psa1Reader::new(stream, &recv_key);
     loop {
