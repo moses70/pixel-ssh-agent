@@ -1,0 +1,21 @@
+[package]
+name = "pixel-ssh-agent-bridge"
+version = "0.1.0"
+edition = "2021"
+description = "Encrypted PSA1 reverse-tunnel bridge exposing Android Pixel SSH Agent via SSH_AUTH_SOCK in Debian VM"
+license = "MIT"
+
+[dependencies]
+aes-gcm = "0.10"
+hex = "0.4"
+hkdf = "0.12"
+hmac = "0.12"
+rand = "0.8"
+sha2 = "0.10"
+subtle = "2"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

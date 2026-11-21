@@ -1,0 +1,12 @@
+[Unit]
+Description=Pixel SSH Agent Bridge (AVF Reverse Tunnel)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/pixel-ssh-agent-bridge run
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
