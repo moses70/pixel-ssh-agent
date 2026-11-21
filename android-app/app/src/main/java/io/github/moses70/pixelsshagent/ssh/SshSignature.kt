@@ -1,4 +1,4 @@
-package dev.pixelsshagent.ssh
+package io.github.moses70.pixelsshagent.ssh
 
 import java.math.BigInteger
 

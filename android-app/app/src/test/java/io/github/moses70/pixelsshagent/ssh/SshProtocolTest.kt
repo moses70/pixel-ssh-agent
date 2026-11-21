@@ -1,4 +1,4 @@
-package dev.pixelsshagent.ssh
+package io.github.moses70.pixelsshagent.ssh
 
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertArrayEquals

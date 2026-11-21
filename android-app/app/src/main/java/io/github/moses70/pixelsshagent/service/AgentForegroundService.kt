@@ -1,4 +1,4 @@
-package dev.pixelsshagent.service
+package io.github.moses70.pixelsshagent.service
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -11,11 +11,11 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
-import dev.pixelsshagent.ssh.SshAgentDispatcher
-import dev.pixelsshagent.tunnel.TunnelClient
-import dev.pixelsshagent.tunnel.TunnelConfig
-import dev.pixelsshagent.tunnel.TunnelConnectionState
-import dev.pixelsshagent.ui.MainActivity
+import io.github.moses70.pixelsshagent.ssh.SshAgentDispatcher
+import io.github.moses70.pixelsshagent.tunnel.TunnelClient
+import io.github.moses70.pixelsshagent.tunnel.TunnelConfig
+import io.github.moses70.pixelsshagent.tunnel.TunnelConnectionState
+import io.github.moses70.pixelsshagent.ui.MainActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -222,9 +222,9 @@ class AgentForegroundService : Service() {
         private const val NOTIF_ID_STATUS = 1001
         private const val NOTIF_ID_SIGN_PROMPT = 1002
 
-        const val ACTION_START = "dev.pixelsshagent.action.START"
-        const val ACTION_STOP = "dev.pixelsshagent.action.STOP"
-        const val ACTION_DENY_SIGN = "dev.pixelsshagent.action.DENY_SIGN"
+        const val ACTION_START = "io.github.moses70.pixelsshagent.action.START"
+        const val ACTION_STOP = "io.github.moses70.pixelsshagent.action.STOP"
+        const val ACTION_DENY_SIGN = "io.github.moses70.pixelsshagent.action.DENY_SIGN"
         const val EXTRA_REQUEST_ID = "request_id"
 
         fun start(context: Context) {

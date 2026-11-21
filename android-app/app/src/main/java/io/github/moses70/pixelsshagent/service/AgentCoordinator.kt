@@ -1,12 +1,12 @@
-package dev.pixelsshagent.service
+package io.github.moses70.pixelsshagent.service
 
 import android.content.Context
-import dev.pixelsshagent.crypto.KeyRepository
-import dev.pixelsshagent.crypto.ManagedKey
-import dev.pixelsshagent.ssh.SshAgentBackend
-import dev.pixelsshagent.ssh.SshIdentity
-import dev.pixelsshagent.ssh.SshKeyAlgorithm
-import dev.pixelsshagent.tunnel.TunnelConnectionState
+import io.github.moses70.pixelsshagent.crypto.KeyRepository
+import io.github.moses70.pixelsshagent.crypto.ManagedKey
+import io.github.moses70.pixelsshagent.ssh.SshAgentBackend
+import io.github.moses70.pixelsshagent.ssh.SshIdentity
+import io.github.moses70.pixelsshagent.ssh.SshKeyAlgorithm
+import io.github.moses70.pixelsshagent.tunnel.TunnelConnectionState
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow

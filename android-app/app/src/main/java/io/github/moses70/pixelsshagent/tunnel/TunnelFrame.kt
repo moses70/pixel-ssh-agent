@@ -1,4 +1,4 @@
-package dev.pixelsshagent.tunnel
+package io.github.moses70.pixelsshagent.tunnel
 
 import java.nio.ByteBuffer
 

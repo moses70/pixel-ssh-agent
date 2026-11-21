@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Terminal prompt chevron '>' -->
+    <path
+        android:pathData="M28,42 L40,54 L28,66"
+        android:strokeWidth="5"
+        android:strokeColor="#64FFDA"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <!-- Key head circle -->
+    <path
+        android:pathData="M56,43 A9,9 0 1,0 56,61 A9,9 0 1,0 56,43 Z"
+        android:strokeWidth="4.5"
+        android:strokeColor="#FFFFFF" />
+    <!-- Key shaft and teeth -->
+    <path
+        android:pathData="M65,52 L82,52 M74,52 L74,59 M80,52 L80,57"
+        android:strokeWidth="4.5"
+        android:strokeColor="#FFFFFF"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+</vector>

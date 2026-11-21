@@ -1,4 +1,4 @@
-package dev.pixelsshagent.ui
+package io.github.moses70.pixelsshagent.ui
 
 import android.Manifest
 import android.content.ClipData
@@ -86,14 +86,14 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
-import dev.pixelsshagent.crypto.ManagedKey
-import dev.pixelsshagent.service.AgentCoordinator
-import dev.pixelsshagent.service.AgentForegroundService
-import dev.pixelsshagent.service.AgentLogEntry
-import dev.pixelsshagent.service.AgentSettings
-import dev.pixelsshagent.service.PendingSignRequest
-import dev.pixelsshagent.ssh.SshKeyAlgorithm
-import dev.pixelsshagent.tunnel.TunnelConnectionState
+import io.github.moses70.pixelsshagent.crypto.ManagedKey
+import io.github.moses70.pixelsshagent.service.AgentCoordinator
+import io.github.moses70.pixelsshagent.service.AgentForegroundService
+import io.github.moses70.pixelsshagent.service.AgentLogEntry
+import io.github.moses70.pixelsshagent.service.AgentSettings
+import io.github.moses70.pixelsshagent.service.PendingSignRequest
+import io.github.moses70.pixelsshagent.ssh.SshKeyAlgorithm
+import io.github.moses70.pixelsshagent.tunnel.TunnelConnectionState
 
 class MainActivity : FragmentActivity() {
     private lateinit var coordinator: AgentCoordinator

@@ -1,4 +1,4 @@
-package dev.pixelsshagent.crypto
+package io.github.moses70.pixelsshagent.crypto
 
 import java.io.DataInputStream
 import java.io.DataOutputStream

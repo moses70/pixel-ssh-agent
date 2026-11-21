@@ -1,9 +1,9 @@
-package dev.pixelsshagent.tunnel
+package io.github.moses70.pixelsshagent.tunnel
 
-import dev.pixelsshagent.crypto.Psa1Protocol
-import dev.pixelsshagent.crypto.Psa1SecurityException
-import dev.pixelsshagent.crypto.Psa1Session
-import dev.pixelsshagent.ssh.SshAgentDispatcher
+import io.github.moses70.pixelsshagent.crypto.Psa1Protocol
+import io.github.moses70.pixelsshagent.crypto.Psa1SecurityException
+import io.github.moses70.pixelsshagent.crypto.Psa1Session
+import io.github.moses70.pixelsshagent.ssh.SshAgentDispatcher
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers

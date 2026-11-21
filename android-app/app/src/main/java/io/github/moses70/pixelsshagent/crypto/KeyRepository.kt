@@ -1,13 +1,13 @@
-package dev.pixelsshagent.crypto
+package io.github.moses70.pixelsshagent.crypto
 
 import android.content.Context
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.security.keystore.StrongBoxUnavailableException
-import dev.pixelsshagent.ssh.SshKeyAlgorithm
-import dev.pixelsshagent.ssh.SshPublicKey
-import dev.pixelsshagent.ssh.SshSignature
+import io.github.moses70.pixelsshagent.ssh.SshKeyAlgorithm
+import io.github.moses70.pixelsshagent.ssh.SshPublicKey
+import io.github.moses70.pixelsshagent.ssh.SshSignature
 import org.json.JSONArray
 import org.json.JSONObject
 import java.security.KeyPairGenerator

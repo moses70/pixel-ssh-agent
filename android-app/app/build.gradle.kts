@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "dev.pixelsshagent"
+    namespace = "io.github.moses70.pixelsshagent"
     compileSdk = libs.versions.compileSdk.get().toInt()
 
     defaultConfig {
-        applicationId = "dev.pixelsshagent"
+        applicationId = "io.github.moses70.pixelsshagent"
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
         versionCode = 1

@@ -1,7 +1,7 @@
-package dev.pixelsshagent.service
+package io.github.moses70.pixelsshagent.service
 
 import android.content.Context
-import dev.pixelsshagent.crypto.HexCodec
+import io.github.moses70.pixelsshagent.crypto.HexCodec
 import java.security.SecureRandom
 
 data class AgentSettings(
