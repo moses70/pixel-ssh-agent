@@ -70,11 +70,13 @@ impl TunnelFrame {
     }
 }
 
+#[allow(dead_code)]
 pub enum ChannelEvent {
     Data(Vec<u8>),
     Closed,
 }
 
+#[allow(dead_code)]
 pub struct ActiveTunnel {
     pub id: u64,
     writer: Mutex<Psa1Writer<TcpStream>>,
@@ -83,6 +85,7 @@ pub struct ActiveTunnel {
     next_channel_id: AtomicU32,
 }
 
+#[allow(dead_code)]
 impl ActiveTunnel {
     fn new(id: u64, write_stream: TcpStream, send_key: &[u8; 32]) -> io::Result<Self> {
         let raw_stream = write_stream.try_clone()?;
@@ -141,6 +144,7 @@ pub struct BridgeHub {
     next_tunnel_id: AtomicU64,
 }
 
+#[allow(dead_code)]
 impl BridgeHub {
     pub fn new() -> Self {
         Self {
