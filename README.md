@@ -1,49 +1,81 @@
 # Pixel SSH Agent
 
-Ein *from scratch* entwickelter **SSH-Agent für Android**, speziell gebaut für das eingebaute **Pixel Linux Terminal (Debian-VM via Android Virtualization Framework / AVF)**.
+[![CI](https://github.com/moses70/pixel-ssh-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/moses70/pixel-ssh-agent/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Die privaten SSH-Schlüssel bleiben dauerhaft auf der Android-Seite (Hardware-Keystore / StrongBox für ECDSA P-256, Keystore-AES-GCM-verschlüsselt für Ed25519) und werden bei Bedarf per **BiometricPrompt** freigegeben. Die Debian-VM erhält eine schlanke **Rust-Bridge**, die einen regulären `SSH_AUTH_SOCK` bereitstellt.
+A **from-scratch SSH agent for Android** designed specifically for the built-in **Pixel Linux Terminal (Debian VM via Android Virtualization Framework / AVF)**.
 
-## Projektstruktur
+Private SSH keys never enter the Debian VM. They remain on the Android host—backed by **Android Keystore / StrongBox** (ECDSA P-256) or Keystore-AES-GCM envelope encryption (Ed25519)—and can require interactive **BiometricPrompt** confirmation per signature. A lightweight, zero-C-dependency **Rust bridge** inside Debian exposes a standard `SSH_AUTH_SOCK` Unix socket to `ssh`, `git`, `scp`, and `ssh-add`.
 
-- [`docs/PROTOCOL.md`](docs/PROTOCOL.md) — Vollständige Spezifikation des `PSA1`-Tunnelprotokolls und der SSH-Agent-Nachrichten.
-- [`android-app/`](android-app/) — Native Android-App (Kotlin + Jetpack Compose, Material 3, Android Keystore / StrongBox, BiometricPrompt, ForegroundService).
-- [`debian-bridge/`](debian-bridge/) — Schlanker Rust-Daemon (`pixel-ssh-agent-bridge`) ohne C-Abhängigkeiten für die Pixel Debian-VM.
+---
 
-## Architektur (Option B: Reverse TCP über AVF-Portweiterleitung)
+## Architecture (Reverse TCP over AVF Port Forwarding)
 
 ```text
-[Pixel Debian VM]                                     [Android Host]
+[Pixel Debian VM (AVF)]                                [Android Host]
 ssh / git / ssh-add -L
-   │  (OpenSSH Agent Protocol über Unix Socket)
+   │  (OpenSSH Agent Protocol over Unix socket)
    ▼
 pixel-ssh-agent-bridge (Rust)
-   │  Lauscht auf TCP 0.0.0.0:22999
-   │  ◄──── AVF Port-Forwarding (127.0.0.1:22999) ────►
-   │                                                  Pixel SSH Agent (Kotlin)
-   │                                                  • Verbindet als TCP-Client
-   │                                                  • PSA1 Handshake (X25519 + PSK)
-   │                                                  • AES-256-GCM Record Framing
-   │                                                  • OpenSSH Agent Protocol
-   │                                                  • Keystore / StrongBox + Biometrie
+   │  Listens on TCP 0.0.0.0:22999
+   │  ◄──── AVF Port Forwarding (127.0.0.1:22999) ────►
+   │                                                   Pixel SSH Agent (Kotlin)
+   │                                                   • Connects as TCP client
+   │                                                   • PSA1 handshake (X25519 + PSK)
+   │                                                   • AES-256-GCM record framing
+   │                                                   • OpenSSH Agent dispatcher
+   │                                                   • Keystore / StrongBox + Biometrics
 ```
 
-## Schritt-für-Schritt-Einrichtung
+Why reverse TCP over AVF port forwarding?
+- The Pixel Linux Terminal maps forwarded guest ports **strictly to `127.0.0.1`** on Android (nothing exposed on Wi-Fi or mobile networks).
+- Because all Android apps with `INTERNET` permission share `127.0.0.1`, the custom **`PSA1`** protocol enforces **mutual authentication + forward-secret end-to-end encryption** using a one-time paired 256-bit Pre-Shared Key (PSK) and ephemeral X25519.
 
-### 1. Android-App bauen & auf dem Pixel installieren
+---
 
-```powershell
-cd android-app
-.\gradlew.bat testDebugUnitTest assembleDebug
-adb install -r app\build\outputs\apk\debug\app-debug.apk
-```
+## Features (MVP)
 
-### 2. Rust-Bridge im Pixel Linux Terminal (Debian) bauen
+- **OpenSSH Agent Protocol from scratch** (`draft-miller-ssh-agent`: `REQUEST_IDENTITIES`, `SIGN_REQUEST`, RFC 4251 wire codec, SHA-256 fingerprints, `authorized_keys` export)
+- **Key algorithms:**
+  - `ecdsa-sha2-nistp256` — Hardware-backed via Android Keystore / StrongBox (DER → OpenSSH wire conversion)
+  - `ssh-ed25519` — Pure-Kotlin RFC 8032 implementation with 32-byte private seeds wrapped by an Android Keystore AES-256-GCM master key
+- **Authenticated & encrypted tunnel (`PSA1`):**
+  - Ephemeral X25519 (RFC 7748) + 256-bit PSK + HKDF-SHA256 (RFC 5869) + directional AES-256-GCM with implicit sequence nonces and AAD
+  - Multiplexed channels (`OPEN` / `DATA` / `CLOSE` / `PING` / `PONG`) for concurrent SSH sessions
+- **Biometric confirmation:** Interactive approval via Android `BiometricPrompt` with optional unlock window (`Every sign` / `1 min` / `5 min` / `15 min`)
+- **Cross-language test parity:** Deterministic `PSA1` key-derivation test vectors verified identically in both Kotlin and Rust unit tests
 
-Kopiere das Verzeichnis `debian-bridge/` in deine Debian-VM (z. B. über `/mnt/shared` / Downloads) und baue das Binary:
+---
+
+## Repository Layout
+
+| Path | Description |
+|------|-------------|
+| [`android-app/`](android-app/) | Native Android app (`io.github.moses70.pixelsshagent`) in Kotlin + Jetpack Compose (Material 3) |
+| [`debian-bridge/`](debian-bridge/) | Pure-Rust daemon (`pixel-ssh-agent-bridge`) + `systemd --user` service unit |
+| [`docs/PROTOCOL.md`](docs/PROTOCOL.md) | Complete byte-level specification of `PSA1` and the SSH agent layers |
+| [`docs/TECHNICAL_BACKGROUND.md`](docs/TECHNICAL_BACKGROUND.md) | Deep-dive technical guide covering SSH wire format, Keystore, AVF, and `PSA1` crypto |
+| [`docs/SUMMARY.md`](docs/SUMMARY.md) | Project milestones, architecture decisions, and verification results |
+| [`SECURITY.md`](SECURITY.md) | Threat model, cryptographic caveats, and vulnerability reporting |
+
+---
+
+## Quick Start
+
+### 1. Build & Install the Android App
 
 ```bash
-# Falls Rust noch nicht installiert ist:
+cd android-app
+./gradlew testDebugUnitTest assembleDebug
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+### 2. Build the Rust Bridge in Pixel Linux Terminal (Debian)
+
+Copy `debian-bridge/` into your Debian VM (e.g. via `/mnt/shared`) and build:
+
+```bash
+# Install Rust if not present:
 sudo apt update && sudo apt install -y cargo rustc
 
 cd ~/debian-bridge
@@ -55,43 +87,39 @@ cp target/release/pixel-ssh-agent-bridge ~/.local/bin/
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-> `cargo test` prüft unter anderem denselben deterministischen `PSA1`-Krypto-Testvektor wie die Kotlin-Unit-Tests in `CryptoAndTunnelTest.kt` und garantiert damit Byte-für-Byte-Kompatibilität.
+### 3. Pair & Enable AVF Port Forwarding
 
-### 3. Pairing & AVF-Portweiterleitung einrichten
-
-1. Öffne **Pixel SSH Agent** auf dem Pixel:
-   - Wechsle auf den Tab **Keys** und erzeuge deinen ersten Schlüssel (`ECDSA P-256 (HW)` oder `Ed25519`).
-   - Wechsle zurück auf **Tunnel** und tippe auf **Copy Debian Init**.
-2. Füge den kopierten Befehl im **Pixel Linux Terminal** ein:
+1. Open **Pixel SSH Agent** on your Pixel:
+   - Go to the **Keys** tab and tap **+** to generate an `ECDSA P-256 (HW)` or `Ed25519` key.
+   - Switch to the **Tunnel** tab and tap **Copy Debian Init**.
+2. Paste and run the command inside the **Pixel Linux Terminal**:
    ```bash
-   pixel-ssh-agent-bridge init --port 22999 --psk <64-zeichen-hex>
+   pixel-ssh-agent-bridge init --port 22999 --psk <64-hex-chars>
    ```
-3. Starte die Bridge in Debian:
+3. Start the bridge daemon:
    ```bash
    pixel-ssh-agent-bridge run
    ```
-4. **AVF-Portweiterleitung aktivieren:**
-   - Das Pixel Linux Terminal meldet den neuen offenen Port `22999` (oder du gibst ihn unter *Terminal-Einstellungen → Port-Steuerung / Portweiterleitung* frei).
-   - Android mappt den Port automatisch **nur lokal auf `127.0.0.1:22999`**.
-5. Tippe in der Android-App auf **Start Agent** → der Status wechselt auf **Connected to Debian VM**.
+4. **Allow port `22999`** when prompted by the Pixel Linux Terminal (or configure it under *Terminal Settings → Port control*).
+5. Tap **Start Agent** in the Android app → status switches to **Connected to Debian VM**.
 
-### 4. In Debian nutzen & testen
+### 4. Use with OpenSSH
 
-In einer zweiten Shell (oder in `~/.bashrc`):
+In a Debian shell (or `~/.bashrc`):
 
 ```bash
 eval "$(pixel-ssh-agent-bridge print-env)"
 
-# Public Keys vom Pixel abfragen:
+# List public keys held on Android:
 ssh-add -L
 
-# Direkt per SSH verbinden (löst ggf. Biometrie-Prompt auf dem Pixel aus):
-ssh user@dein-server
+# Authenticate to a remote server (triggers biometric prompt if enabled):
+ssh user@your-server
 ```
 
-Den zugehörigen `authorized_keys`-Eintrag kannst du in der Android-App im Tab **Keys** direkt per Klick auf das Kopieren-Symbol in die Zwischenablage legen.
+Copy the corresponding `authorized_keys` line directly from the **Keys** tab in the Android app.
 
-### 5. Optional: Automatischer Start via `systemd --user`
+### 5. Optional: Auto-start via `systemd --user`
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -100,9 +128,33 @@ systemctl --user daemon-reload
 systemctl --user enable --now pixel-ssh-agent-bridge.service
 ```
 
-Und in `~/.bashrc` ergänzen:
+Add to `~/.bashrc`:
 ```bash
 if command -v pixel-ssh-agent-bridge >/dev/null 2>&1; then
     eval "$(pixel-ssh-agent-bridge print-env 2>/dev/null)"
 fi
 ```
+
+---
+
+## Live Testing Against an Android Emulator (Without a Pixel VM)
+
+You can test the full encrypted Rust ↔ Android pipeline on your desktop using the built-in `test-live` subcommand:
+
+```bash
+adb reverse tcp:22999 tcp:22999
+cd debian-bridge
+cargo run -- test-live --port 22999 --psk <64-hex-psk-from-app>
+```
+
+Then tap **Start Agent** in the emulator app to verify `PSA1` handshake, Ping/Pong keepalive, `REQUEST_IDENTITIES`, and interactive `SIGN_REQUEST`.
+
+---
+
+## Security Notice
+
+Please read [`SECURITY.md`](SECURITY.md) before using this project for sensitive production keys. In particular, this is an early MVP (`0.1.0`) and the pure-Kotlin `BigInteger` Ed25519/X25519 implementations are not constant-time; hardware-backed **ECDSA P-256** is recommended for maximum key isolation.
+
+## License
+
+Licensed under the [MIT License](LICENSE).
