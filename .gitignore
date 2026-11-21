@@ -1,0 +1,20 @@
+# Gradle / Android
+.gradle/
+**/build/
+local.properties
+*.iml
+.idea/
+*.keystore
+*.jks
+captures/
+.cxx/
+
+# Rust
+debian-bridge/target/
+**/*.rs.bk
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+*.swp
+*~
