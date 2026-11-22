@@ -70,8 +70,19 @@ class AgentCoordinator private constructor(context: Context) : SshAgentBackend {
 
     fun updateSettings(newSettings: AgentSettings) {
         settingsStore.save(newSettings)
-        _settings.value = settingsStore.load()
-        appendLog("Settings updated (${_settings.value.host}:${_settings.value.port})")
+        val loaded = settingsStore.load()
+        _settings.value = loaded
+        val mins = loaded.unlockWindowMinutes
+        if (mins == 0) {
+            unlockedUntilMs = 0L
+        } else if (unlockedUntilMs > 0L) {
+            val maxAllowed = System.currentTimeMillis() + mins * 60_000L
+            if (unlockedUntilMs > maxAllowed) {
+                unlockedUntilMs = maxAllowed
+            }
+        }
+        val unlockText = if (mins == 0) "Every sign" else "$mins min"
+        appendLog("Settings updated (${loaded.host}:${loaded.port}, unlock: $unlockText)")
     }
 
     fun regeneratePsk(): String {
@@ -124,8 +135,10 @@ class AgentCoordinator private constructor(context: Context) : SshAgentBackend {
         if (pending != null && pending.requestId == requestId) {
             if (approved) {
                 val mins = _settings.value.unlockWindowMinutes
-                if (mins > 0) {
-                    unlockedUntilMs = System.currentTimeMillis() + mins * 60_000L
+                unlockedUntilMs = if (mins > 0) {
+                    System.currentTimeMillis() + mins * 60_000L
+                } else {
+                    0L
                 }
             }
             pending.decision.complete(approved)
@@ -136,6 +149,11 @@ class AgentCoordinator private constructor(context: Context) : SshAgentBackend {
     fun lockNow() {
         unlockedUntilMs = 0L
         appendLog("Agent unlock window cleared")
+    }
+
+    private fun isCurrentlyUnlocked(): Boolean {
+        val mins = _settings.value.unlockWindowMinutes
+        return mins > 0 && System.currentTimeMillis() < unlockedUntilMs
     }
 
     override suspend fun listIdentities(): List<SshIdentity> {
@@ -151,7 +169,7 @@ class AgentCoordinator private constructor(context: Context) : SshAgentBackend {
             return null
         }
 
-        if (key.requireBiometric && System.currentTimeMillis() >= unlockedUntilMs) {
+        if (key.requireBiometric && !isCurrentlyUnlocked()) {
             val approved = requestUserApproval(key, data.size)
             if (!approved) {
                 appendLog("SIGN_REQUEST denied/timed out for '${key.comment}'")
@@ -171,7 +189,7 @@ class AgentCoordinator private constructor(context: Context) : SshAgentBackend {
 
     private suspend fun requestUserApproval(key: ManagedKey, payloadBytes: Int): Boolean {
         return approvalMutex.withLock {
-            if (System.currentTimeMillis() < unlockedUntilMs) {
+            if (isCurrentlyUnlocked()) {
                 return@withLock true
             }
             val deferred = CompletableDeferred<Boolean>()

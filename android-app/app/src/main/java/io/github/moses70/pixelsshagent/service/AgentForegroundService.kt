@@ -118,6 +118,7 @@ class AgentForegroundService : Service() {
         tunnelClient?.closeCurrentSocket()
         tunnelJob = null
         tunnelClient = null
+        coordinator.lockNow()
         coordinator.updateConnectionState(TunnelConnectionState.STOPPED, null)
         notificationManager.cancel(NOTIF_ID_SIGN_PROMPT)
     }
