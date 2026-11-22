@@ -1,6 +1,7 @@
 package io.github.moses70.pixelsshagent.ui
 
 import android.Manifest
+import android.app.KeyguardManager
 import android.app.NotificationManager
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -92,6 +93,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -118,6 +120,8 @@ import io.github.moses70.pixelsshagent.tunnel.TunnelConnectionState
 class MainActivity : FragmentActivity() {
     private lateinit var coordinator: AgentCoordinator
     private var activePromptRequestId: String? = null
+    private val isDeviceLockedFlow = MutableStateFlow(false)
+    private val isWindowFocusedFlow = MutableStateFlow(false)
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -126,6 +130,7 @@ class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         coordinator = AgentCoordinator.get(this)
+        refreshKeyguardState()
         handleWakeIntent(intent)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -138,8 +143,13 @@ class MainActivity : FragmentActivity() {
 
         setContent {
             PixelSshAgentTheme {
+                val isDeviceLocked by isDeviceLockedFlow.collectAsState()
+                val isWindowFocused by isWindowFocusedFlow.collectAsState()
                 AgentAppScreen(
                     coordinator = coordinator,
+                    isDeviceLocked = isDeviceLocked,
+                    isWindowFocused = isWindowFocused,
+                    hasDeviceAuth = canUseDeviceAuth(),
                     onStartService = { AgentForegroundService.start(this) },
                     onStopService = { AgentForegroundService.stop(this) },
                     onTriggerBiometric = { request -> launchBiometricPrompt(request) },
@@ -149,10 +159,27 @@ class MainActivity : FragmentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        refreshKeyguardState()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        isWindowFocusedFlow.value = hasFocus
+        refreshKeyguardState()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        refreshKeyguardState()
         handleWakeIntent(intent)
+    }
+
+    private fun refreshKeyguardState() {
+        val km = getSystemService(KeyguardManager::class.java)
+        isDeviceLockedFlow.value = km?.isKeyguardLocked == true
     }
 
     private fun handleWakeIntent(intent: Intent?) {
@@ -167,13 +194,18 @@ class MainActivity : FragmentActivity() {
         setTurnScreenOn(enabled)
     }
 
-    private fun launchBiometricPrompt(request: PendingSignRequest) {
-        if (activePromptRequestId == request.requestId) return
+    private fun canUseDeviceAuth(): Boolean {
         val bm = BiometricManager.from(this)
         val authenticators = BiometricManager.Authenticators.BIOMETRIC_STRONG or
             BiometricManager.Authenticators.DEVICE_CREDENTIAL
-        if (bm.canAuthenticate(authenticators) != BiometricManager.BIOMETRIC_SUCCESS) {
-            // Device has no biometrics/PIN configured (e.g. fresh emulator); user can approve via dialog card.
+        return bm.canAuthenticate(authenticators) == BiometricManager.BIOMETRIC_SUCCESS
+    }
+
+    private fun launchBiometricPrompt(request: PendingSignRequest) {
+        if (activePromptRequestId == request.requestId) return
+        val authenticators = BiometricManager.Authenticators.BIOMETRIC_STRONG or
+            BiometricManager.Authenticators.DEVICE_CREDENTIAL
+        if (!canUseDeviceAuth()) {
             return
         }
 
@@ -186,11 +218,17 @@ class MainActivity : FragmentActivity() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
                     activePromptRequestId = null
                     coordinator.resolvePendingSign(request.requestId, approved = true)
+                    refreshKeyguardState()
                 }
 
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
                     activePromptRequestId = null
-                    coordinator.resolvePendingSign(request.requestId, approved = false)
+                    if (errorCode == BiometricPrompt.ERROR_USER_CANCELED ||
+                        errorCode == BiometricPrompt.ERROR_NEGATIVE_BUTTON
+                    ) {
+                        coordinator.resolvePendingSign(request.requestId, approved = false)
+                    }
+                    refreshKeyguardState()
                 }
             },
         )
@@ -223,6 +261,9 @@ private fun PixelSshAgentTheme(content: @Composable () -> Unit) {
 @Composable
 private fun AgentAppScreen(
     coordinator: AgentCoordinator,
+    isDeviceLocked: Boolean,
+    isWindowFocused: Boolean,
+    hasDeviceAuth: Boolean,
     onStartService: () -> Unit,
     onStopService: () -> Unit,
     onTriggerBiometric: (PendingSignRequest) -> Unit,
@@ -241,9 +282,45 @@ private fun AgentAppScreen(
     val unlockedUntilMs by coordinator.unlockedUntilMs.collectAsState()
     val context = LocalContext.current
 
-    LaunchedEffect(pendingSign?.requestId) {
+    LaunchedEffect(pendingSign?.requestId, isWindowFocused) {
         onLockScreenWakeupChanged(pendingSign != null)
-        pendingSign?.let { onTriggerBiometric(it) }
+        val req = pendingSign
+        if (req != null && isWindowFocused) {
+            if (isDeviceLocked) {
+                delay(150L)
+            }
+            onTriggerBiometric(req)
+        }
+    }
+
+    // Security: when shown over the lock screen, NEVER expose keys, PSK, or logs — only the auth prompt.
+    if (isDeviceLocked) {
+        Scaffold { innerPadding ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .padding(16.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                val req = pendingSign
+                if (req != null) {
+                    PendingApprovalBanner(
+                        request = req,
+                        requireBiometricAuth = hasDeviceAuth || isDeviceLocked,
+                        onVerifyBiometric = { onTriggerBiometric(req) },
+                        onFallbackApprove = { coordinator.resolvePendingSign(req.requestId, true) },
+                        onDeny = { coordinator.resolvePendingSign(req.requestId, false) },
+                    )
+                } else {
+                    Text(
+                        "Device is locked. Unlock to manage Pixel SSH Agent.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+            }
+        }
+        return
     }
 
     Scaffold(
@@ -307,7 +384,9 @@ private fun AgentAppScreen(
             pendingSign?.let { req ->
                 PendingApprovalBanner(
                     request = req,
-                    onApprove = { coordinator.resolvePendingSign(req.requestId, true) },
+                    requireBiometricAuth = hasDeviceAuth,
+                    onVerifyBiometric = { onTriggerBiometric(req) },
+                    onFallbackApprove = { coordinator.resolvePendingSign(req.requestId, true) },
                     onDeny = { coordinator.resolvePendingSign(req.requestId, false) },
                 )
             }
@@ -363,7 +442,9 @@ private fun AgentAppScreen(
 @Composable
 private fun PendingApprovalBanner(
     request: PendingSignRequest,
-    onApprove: () -> Unit,
+    requireBiometricAuth: Boolean,
+    onVerifyBiometric: () -> Unit,
+    onFallbackApprove: () -> Unit,
     onDeny: () -> Unit,
 ) {
     Card(
@@ -396,7 +477,15 @@ private fun PendingApprovalBanner(
             )
             Spacer(Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onApprove) { Text("Approve") }
+                if (requireBiometricAuth) {
+                    Button(onClick = onVerifyBiometric) {
+                        Icon(Icons.Default.Fingerprint, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Verify with Biometrics")
+                    }
+                } else {
+                    Button(onClick = onFallbackApprove) { Text("Approve") }
+                }
                 OutlinedButton(onClick = onDeny) { Text("Deny") }
             }
         }
