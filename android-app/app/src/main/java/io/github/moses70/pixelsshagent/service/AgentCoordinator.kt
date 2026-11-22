@@ -62,8 +62,8 @@ class AgentCoordinator private constructor(context: Context) : SshAgentBackend {
     private val _pendingSignRequest = MutableStateFlow<PendingSignRequest?>(null)
     val pendingSignRequest: StateFlow<PendingSignRequest?> = _pendingSignRequest.asStateFlow()
 
-    @Volatile
-    private var unlockedUntilMs: Long = 0L
+    private val _unlockedUntilMs = MutableStateFlow(0L)
+    val unlockedUntilMs: StateFlow<Long> = _unlockedUntilMs.asStateFlow()
 
     @Volatile
     var onSignPromptRequested: ((PendingSignRequest) -> Unit)? = null
@@ -74,11 +74,11 @@ class AgentCoordinator private constructor(context: Context) : SshAgentBackend {
         _settings.value = loaded
         val mins = loaded.unlockWindowMinutes
         if (mins == 0) {
-            unlockedUntilMs = 0L
-        } else if (unlockedUntilMs > 0L) {
+            _unlockedUntilMs.value = 0L
+        } else if (_unlockedUntilMs.value > 0L) {
             val maxAllowed = System.currentTimeMillis() + mins * 60_000L
-            if (unlockedUntilMs > maxAllowed) {
-                unlockedUntilMs = maxAllowed
+            if (_unlockedUntilMs.value > maxAllowed) {
+                _unlockedUntilMs.value = maxAllowed
             }
         }
         val unlockText = if (mins == 0) "Every sign" else "$mins min"
@@ -135,7 +135,7 @@ class AgentCoordinator private constructor(context: Context) : SshAgentBackend {
         if (pending != null && pending.requestId == requestId) {
             if (approved) {
                 val mins = _settings.value.unlockWindowMinutes
-                unlockedUntilMs = if (mins > 0) {
+                _unlockedUntilMs.value = if (mins > 0) {
                     System.currentTimeMillis() + mins * 60_000L
                 } else {
                     0L
@@ -147,13 +147,22 @@ class AgentCoordinator private constructor(context: Context) : SshAgentBackend {
     }
 
     fun lockNow() {
-        unlockedUntilMs = 0L
-        appendLog("Agent unlock window cleared")
+        val wasUnlocked = _unlockedUntilMs.value > System.currentTimeMillis()
+        _unlockedUntilMs.value = 0L
+        if (wasUnlocked) {
+            appendLog("Agent locked — next signature requires confirmation")
+        }
     }
 
     private fun isCurrentlyUnlocked(): Boolean {
         val mins = _settings.value.unlockWindowMinutes
-        return mins > 0 && System.currentTimeMillis() < unlockedUntilMs
+        val until = _unlockedUntilMs.value
+        if (mins <= 0 || until <= 0L) return false
+        val active = System.currentTimeMillis() < until
+        if (!active) {
+            _unlockedUntilMs.value = 0L
+        }
+        return active
     }
 
     override suspend fun listIdentities(): List<SshIdentity> {

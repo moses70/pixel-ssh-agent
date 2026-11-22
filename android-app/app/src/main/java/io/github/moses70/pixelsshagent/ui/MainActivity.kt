@@ -80,9 +80,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -208,6 +210,8 @@ private fun AgentAppScreen(
     val statusMessage by coordinator.statusMessage.collectAsState()
     val logs by coordinator.logs.collectAsState()
     val pendingSign by coordinator.pendingSignRequest.collectAsState()
+    val unlockedUntilMs by coordinator.unlockedUntilMs.collectAsState()
+    val context = LocalContext.current
 
     LaunchedEffect(pendingSign?.requestId) {
         pendingSign?.let { onTriggerBiometric(it) }
@@ -223,8 +227,13 @@ private fun AgentAppScreen(
                             Icon(Icons.Default.FileUpload, contentDescription = "Import private key")
                         }
                     }
-                    if (settings.unlockWindowMinutes > 0) {
-                        IconButton(onClick = { coordinator.lockNow() }) {
+                    if (unlockedUntilMs > System.currentTimeMillis()) {
+                        IconButton(
+                            onClick = {
+                                coordinator.lockNow()
+                                Toast.makeText(context, "Locked — next sign requires confirmation", Toast.LENGTH_SHORT).show()
+                            },
+                        ) {
                             Icon(Icons.Default.Lock, contentDescription = "Lock now")
                         }
                     }
@@ -279,8 +288,13 @@ private fun AgentAppScreen(
                     settings = settings,
                     connectionState = connectionState,
                     statusMessage = statusMessage,
+                    unlockedUntilMs = unlockedUntilMs,
                     onSaveSettings = { coordinator.updateSettings(it) },
                     onRegeneratePsk = { coordinator.regeneratePsk() },
+                    onLockNow = {
+                        coordinator.lockNow()
+                        Toast.makeText(context, "Locked — next sign requires confirmation", Toast.LENGTH_SHORT).show()
+                    },
                     onStartService = onStartService,
                     onStopService = onStopService,
                 )
@@ -366,8 +380,10 @@ private fun TunnelAndPairingTab(
     settings: AgentSettings,
     connectionState: TunnelConnectionState,
     statusMessage: String?,
+    unlockedUntilMs: Long,
     onSaveSettings: (AgentSettings) -> Unit,
     onRegeneratePsk: () -> String,
+    onLockNow: () -> Unit,
     onStartService: () -> Unit,
     onStopService: () -> Unit,
 ) {
@@ -376,6 +392,18 @@ private fun TunnelAndPairingTab(
     var portText by remember(settings.port) { mutableStateOf(settings.port.toString()) }
     var pskText by remember(settings.pskHex) { mutableStateOf(settings.pskHex) }
     var unlockMinutes by remember(settings.unlockWindowMinutes) { mutableIntStateOf(settings.unlockWindowMinutes) }
+
+    var nowMs by remember(unlockedUntilMs) { mutableLongStateOf(System.currentTimeMillis()) }
+    val remainingSec = ((unlockedUntilMs - nowMs) / 1000L).coerceAtLeast(0L)
+    val isUnlocked = unlockedUntilMs > 0L && remainingSec > 0L
+
+    LaunchedEffect(unlockedUntilMs) {
+        while (unlockedUntilMs > System.currentTimeMillis()) {
+            nowMs = System.currentTimeMillis()
+            delay(1_000L)
+        }
+        nowMs = System.currentTimeMillis()
+    }
 
     val unlockSummary = if (settings.unlockWindowMinutes == 0) "Every sign" else "${settings.unlockWindowMinutes} min"
 
@@ -419,7 +447,20 @@ private fun TunnelAndPairingTab(
                 if (!statusMessage.isNullOrBlank()) {
                     Text(statusMessage, style = MaterialTheme.typography.bodySmall)
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                if (isUnlocked) {
+                    val minsLeft = remainingSec / 60
+                    val secsLeft = remainingSec % 60
+                    Text(
+                        text = String.format(java.util.Locale.US, "Biometric unlock active • %d:%02d left", minsLeft, secsLeft),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
                     Button(
                         onClick = { if (running) onStopService() else onStartService() },
                         colors = if (running) {
@@ -434,6 +475,13 @@ private fun TunnelAndPairingTab(
                         )
                         Spacer(Modifier.width(6.dp))
                         Text(if (running) "Stop Agent" else "Start Agent")
+                    }
+                    if (isUnlocked) {
+                        OutlinedButton(onClick = onLockNow) {
+                            Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Lock Now")
+                        }
                     }
                 }
             }
