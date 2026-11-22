@@ -89,6 +89,18 @@ class AgentCoordinator private constructor(context: Context) : SshAgentBackend {
         return key
     }
 
+    fun importKey(
+        rawKeyInput: String,
+        passphrase: String?,
+        commentOverride: String?,
+        requireBiometric: Boolean,
+    ): ManagedKey {
+        val key = keyRepository.importKey(rawKeyInput, passphrase, commentOverride, requireBiometric)
+        _keys.value = keyRepository.listKeys()
+        appendLog("Imported ${key.algorithm.sshName} key '${key.comment}'")
+        return key
+    }
+
     fun deleteKey(id: String) {
         val target = _keys.value.firstOrNull { it.id == id }
         if (keyRepository.deleteKey(id)) {

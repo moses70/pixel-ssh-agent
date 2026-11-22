@@ -6,16 +6,23 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.security.keystore.StrongBoxUnavailableException
 import io.github.moses70.pixelsshagent.ssh.SshKeyAlgorithm
+import io.github.moses70.pixelsshagent.ssh.SshKeyImportException
+import io.github.moses70.pixelsshagent.ssh.SshPrivateKeyParser
 import io.github.moses70.pixelsshagent.ssh.SshPublicKey
 import io.github.moses70.pixelsshagent.ssh.SshSignature
 import org.json.JSONArray
 import org.json.JSONObject
+import java.math.BigInteger
+import java.security.AlgorithmParameters
+import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.PrivateKey
 import java.security.Signature
 import java.security.interfaces.ECPublicKey
 import java.security.spec.ECGenParameterSpec
+import java.security.spec.ECParameterSpec
+import java.security.spec.ECPrivateKeySpec
 import java.util.Base64
 import java.util.UUID
 import javax.crypto.Cipher
@@ -31,6 +38,7 @@ data class ManagedKey(
     val requireBiometric: Boolean,
     val strongBoxBacked: Boolean,
     val createdAtMs: Long,
+    val imported: Boolean = false,
     internal val keystoreAlias: String? = null,
     internal val wrappedSeedB64: String? = null,
 ) {
@@ -78,6 +86,43 @@ class KeyRepository(context: Context) {
         entry
     }
 
+    fun importKey(
+        rawKeyInput: String,
+        passphrase: String? = null,
+        commentOverride: String? = null,
+        requireBiometric: Boolean = true,
+    ): ManagedKey = synchronized(lock) {
+        val parsed = SshPrivateKeyParser.parse(rawKeyInput, passphrase)
+        try {
+            val current = loadAllLocked().toMutableList()
+            if (current.any { it.publicKey.blob.contentEquals(parsed.publicKey.blob) }) {
+                throw SshKeyImportException("This SSH key is already stored")
+            }
+
+            val comment = commentOverride?.trim()?.ifEmpty { null }
+                ?: parsed.embeddedComment.trim().ifEmpty { "imported-${parsed.algorithm.sshName}" }
+
+            val wrapped = wrapSeed(parsed.secretMaterial)
+            val entry = ManagedKey(
+                id = UUID.randomUUID().toString(),
+                comment = comment,
+                algorithm = parsed.algorithm,
+                publicKey = parsed.publicKey,
+                requireBiometric = requireBiometric,
+                strongBoxBacked = false,
+                createdAtMs = System.currentTimeMillis(),
+                imported = true,
+                keystoreAlias = null,
+                wrappedSeedB64 = Base64.getEncoder().encodeToString(wrapped),
+            )
+            current.add(entry)
+            saveAllLocked(current)
+            entry
+        } finally {
+            parsed.wipeSecret()
+        }
+    }
+
     fun deleteKey(id: String): Boolean = synchronized(lock) {
         val current = loadAllLocked().toMutableList()
         val target = current.firstOrNull { it.id == id } ?: return false
@@ -96,13 +141,32 @@ class KeyRepository(context: Context) {
     fun sign(key: ManagedKey, data: ByteArray): ByteArray = synchronized(lock) {
         when (key.algorithm) {
             SshKeyAlgorithm.ECDSA_P256 -> {
-                val alias = requireNotNull(key.keystoreAlias) { "Missing keystore alias" }
-                val privateKey = keyStore.getKey(alias, null) as? PrivateKey
-                    ?: throw IllegalStateException("Keystore entry not found: $alias")
-                val signer = Signature.getInstance("SHA256withECDSA")
-                signer.initSign(privateKey)
-                signer.update(data)
-                val derSig = signer.sign()
+                val alias = key.keystoreAlias
+                val derSig = if (alias != null) {
+                    val privateKey = keyStore.getKey(alias, null) as? PrivateKey
+                        ?: throw IllegalStateException("Keystore entry not found: $alias")
+                    val signer = Signature.getInstance("SHA256withECDSA")
+                    signer.initSign(privateKey)
+                    signer.update(data)
+                    signer.sign()
+                } else {
+                    val wrappedB64 = requireNotNull(key.wrappedSeedB64) { "Missing wrapped ECDSA scalar" }
+                    val scalarBytes = unwrapSeed(Base64.getDecoder().decode(wrappedB64))
+                    try {
+                        val params = AlgorithmParameters.getInstance("EC").apply {
+                            init(ECGenParameterSpec("secp256r1"))
+                        }
+                        val ecSpec = params.getParameterSpec(ECParameterSpec::class.java)
+                        val privKey = KeyFactory.getInstance("EC")
+                            .generatePrivate(ECPrivateKeySpec(BigInteger(1, scalarBytes), ecSpec))
+                        val signer = Signature.getInstance("SHA256withECDSA")
+                        signer.initSign(privKey)
+                        signer.update(data)
+                        signer.sign()
+                    } finally {
+                        scalarBytes.fill(0)
+                    }
+                }
                 SshSignature.encodeEcdsaP256FromDer(derSig)
             }
 
@@ -251,6 +315,7 @@ class KeyRepository(context: Context) {
                     requireBiometric = obj.optBoolean("requireBiometric", true),
                     strongBoxBacked = obj.optBoolean("strongBoxBacked", false),
                     createdAtMs = obj.optLong("createdAtMs", 0L),
+                    imported = obj.optBoolean("imported", false),
                     keystoreAlias = obj.optString("keystoreAlias", "").ifEmpty { null },
                     wrappedSeedB64 = obj.optString("wrappedSeedB64", "").ifEmpty { null },
                 ),
@@ -270,6 +335,7 @@ class KeyRepository(context: Context) {
             obj.put("requireBiometric", key.requireBiometric)
             obj.put("strongBoxBacked", key.strongBoxBacked)
             obj.put("createdAtMs", key.createdAtMs)
+            obj.put("imported", key.imported)
             key.keystoreAlias?.let { obj.put("keystoreAlias", it) }
             key.wrappedSeedB64?.let { obj.put("wrappedSeedB64", it) }
             arr.put(obj)

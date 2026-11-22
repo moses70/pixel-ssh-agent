@@ -5,9 +5,11 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.biometric.BiometricManager
@@ -35,6 +37,7 @@ import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Link
@@ -82,6 +85,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -93,6 +97,7 @@ import io.github.moses70.pixelsshagent.service.AgentLogEntry
 import io.github.moses70.pixelsshagent.service.AgentSettings
 import io.github.moses70.pixelsshagent.service.PendingSignRequest
 import io.github.moses70.pixelsshagent.ssh.SshKeyAlgorithm
+import io.github.moses70.pixelsshagent.ssh.SshPrivateKeyParser
 import io.github.moses70.pixelsshagent.tunnel.TunnelConnectionState
 
 class MainActivity : FragmentActivity() {
@@ -189,6 +194,7 @@ private fun AgentAppScreen(
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
     var showCreateKeyDialog by remember { mutableStateOf(false) }
+    var showImportKeyDialog by remember { mutableStateOf(false) }
 
     val settings by coordinator.settings.collectAsState()
     val keys by coordinator.keys.collectAsState()
@@ -206,6 +212,11 @@ private fun AgentAppScreen(
             TopAppBar(
                 title = { Text("Pixel SSH Agent", fontWeight = FontWeight.SemiBold) },
                 actions = {
+                    if (selectedTab == 1) {
+                        IconButton(onClick = { showImportKeyDialog = true }) {
+                            Icon(Icons.Default.FileUpload, contentDescription = "Import private key")
+                        }
+                    }
                     if (settings.unlockWindowMinutes > 0) {
                         IconButton(onClick = { coordinator.lockNow() }) {
                             Icon(Icons.Default.Lock, contentDescription = "Lock now")
@@ -271,6 +282,7 @@ private fun AgentAppScreen(
                 1 -> KeysTab(
                     keys = keys,
                     onDeleteKey = { coordinator.deleteKey(it) },
+                    onImportClick = { showImportKeyDialog = true },
                 )
 
                 2 -> ActivityLogTab(logs = logs)
@@ -284,6 +296,16 @@ private fun AgentAppScreen(
             onCreate = { comment, algo, requireBio ->
                 coordinator.createKey(comment, algo, requireBio)
                 showCreateKeyDialog = false
+            },
+        )
+    }
+
+    if (showImportKeyDialog) {
+        ImportKeyDialog(
+            onDismiss = { showImportKeyDialog = false },
+            onImport = { rawKey, passphrase, commentOverride, requireBio ->
+                coordinator.importKey(rawKey, passphrase, commentOverride, requireBio)
+                showImportKeyDialog = false
             },
         )
     }
@@ -487,15 +509,26 @@ private fun TunnelAndPairingTab(
 private fun KeysTab(
     keys: List<ManagedKey>,
     onDeleteKey: (String) -> Unit,
+    onImportClick: () -> Unit,
 ) {
     val context = LocalContext.current
     if (keys.isEmpty()) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text(
-                "No SSH keys yet.\nTap + to create a Hardware ECDSA P-256 or Ed25519 key.",
-                style = MaterialTheme.typography.bodyMedium,
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp),
                 modifier = Modifier.padding(24.dp),
-            )
+            ) {
+                Text(
+                    "No SSH keys yet.\nTap + to generate a key or import an existing OpenSSH private key.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                OutlinedButton(onClick = onImportClick) {
+                    Icon(Icons.Default.FileUpload, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Import Private Key")
+                }
+            }
         }
         return
     }
@@ -506,6 +539,16 @@ private fun KeysTab(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        item {
+            OutlinedButton(
+                onClick = onImportClick,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Default.FileUpload, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Import OpenSSH Private Key")
+            }
+        }
         items(keys, key = { it.id }) { key ->
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -530,7 +573,8 @@ private fun KeysTab(
                     }
                     val badge = buildString {
                         append(key.algorithm.sshName)
-                        if (key.strongBoxBacked) append(" • StrongBox")
+                        if (key.imported) append(" • Imported (Keystore-wrapped)")
+                        else if (key.strongBoxBacked) append(" • StrongBox")
                         else if (key.algorithm == SshKeyAlgorithm.ECDSA_P256) append(" • AndroidKeyStore")
                         else append(" • Keystore-wrapped")
                         if (key.requireBiometric) append(" • Biometric")
@@ -641,4 +685,138 @@ private fun copyToClipboard(context: Context, label: String, text: String) {
     val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     cm.setPrimaryClip(ClipData.newPlainText(label, text))
     Toast.makeText(context, "Copied: $label", Toast.LENGTH_SHORT).show()
+}
+
+@Composable
+private fun ImportKeyDialog(
+    onDismiss: () -> Unit,
+    onImport: (rawKey: String, passphrase: String?, commentOverride: String?, requireBiometric: Boolean) -> Unit,
+) {
+    val context = LocalContext.current
+    var rawKeyText by remember { mutableStateOf("") }
+    var passphrase by remember { mutableStateOf("") }
+    var commentOverride by remember { mutableStateOf("") }
+    var requireBio by remember { mutableStateOf(true) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+
+    val isEncrypted = remember(rawKeyText) {
+        SshPrivateKeyParser.isEncryptedOpenSshKey(rawKeyText)
+    }
+
+    val filePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri: Uri? ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                    ?: error("Could not open selected file")
+            }.onSuccess { content ->
+                rawKeyText = content
+                errorMessage = null
+            }.onFailure { err ->
+                errorMessage = err.message ?: "Failed to read file"
+            }
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Import SSH Private Key") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    "Supports OpenSSH Ed25519 & ECDSA P-256 private keys (plain or passphrase-encrypted).",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+
+                OutlinedButton(
+                    onClick = { filePicker.launch(arrayOf("*/*")) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(Icons.Default.FileUpload, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Load Key File...")
+                }
+
+                OutlinedTextField(
+                    value = rawKeyText,
+                    onValueChange = {
+                        rawKeyText = it
+                        errorMessage = null
+                    },
+                    label = { Text("OpenSSH Private Key (or 64-hex seed)") },
+                    textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                    minLines = 4,
+                    maxLines = 6,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+
+                if (isEncrypted || passphrase.isNotEmpty()) {
+                    OutlinedTextField(
+                        value = passphrase,
+                        onValueChange = {
+                            passphrase = it
+                            errorMessage = null
+                        },
+                        label = { Text("Passphrase (key is encrypted)") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+
+                OutlinedTextField(
+                    value = commentOverride,
+                    onValueChange = { commentOverride = it },
+                    label = { Text("Comment (optional — defaults to key comment)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Require Biometric Confirmation")
+                    Switch(checked = requireBio, onCheckedChange = { requireBio = it })
+                }
+
+                if (errorMessage != null) {
+                    Text(
+                        text = errorMessage!!,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    runCatching {
+                        onImport(
+                            rawKeyText,
+                            passphrase.ifEmpty { null },
+                            commentOverride.ifBlank { null },
+                            requireBio,
+                        )
+                    }.onFailure { err ->
+                        errorMessage = err.message ?: "Import failed"
+                    }
+                },
+                enabled = rawKeyText.isNotBlank(),
+            ) {
+                Text("Import")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        },
+    )
 }
