@@ -92,47 +92,55 @@ export PATH="$HOME/.local/bin:$PATH"
 1. Open **Pixel SSH Agent** on your Pixel:
    - Go to the **Keys** tab and tap **+** to generate an `ECDSA P-256 (HW)` or `Ed25519` key.
    - Switch to the **Tunnel** tab and tap **Copy Debian Init**.
-2. Paste and run the command inside the **Pixel Linux Terminal**:
+2. Paste and run the one-time init command inside the **Pixel Linux Terminal**:
    ```bash
    pixel-ssh-agent-bridge init --port 22999 --psk <64-hex-chars>
    ```
-3. Start the bridge daemon:
+3. Start the bridge and export environment variables in one step—**just like `ssh-agent`**:
    ```bash
-   pixel-ssh-agent-bridge run
+   eval "$(pixel-ssh-agent-bridge)"
    ```
+   *(Or do step 2 + 3 in a single command: `eval "$(pixel-ssh-agent-bridge --port 22999 --psk <64-hex-chars>)"`)*
 4. **Allow port `22999`** when prompted by the Pixel Linux Terminal (or configure it under *Terminal Settings → Port control*).
 5. Tap **Start Agent** in the Android app → status switches to **Connected to Debian VM**.
 
-### 4. Use with OpenSSH
+### 4. Use with OpenSSH (`ssh-agent` Compatible CLI)
 
-In a Debian shell (or `~/.bashrc`):
+`pixel-ssh-agent-bridge` supports standard `ssh-agent` flags (`-s`, `-c`, `-k`, `-D`, `-a <socket>`) and is **idempotent**—if the daemon is already running, `eval "$(pixel-ssh-agent-bridge)"` simply outputs the existing `SSH_AUTH_SOCK` and `SSH_AGENT_PID` without spawning a duplicate process:
 
 ```bash
-eval "$(pixel-ssh-agent-bridge print-env)"
+# Start background daemon (if not running) and export SSH_AUTH_SOCK & SSH_AGENT_PID:
+eval "$(pixel-ssh-agent-bridge)"
 
 # List public keys held on Android:
 ssh-add -L
 
 # Authenticate to a remote server (triggers biometric prompt if enabled):
 ssh user@your-server
+
+# Stop the running background daemon (like ssh-agent -k):
+eval "$(pixel-ssh-agent-bridge -k)"
 ```
 
 Copy the corresponding `authorized_keys` line directly from the **Keys** tab in the Android app.
 
-### 5. Optional: Auto-start via `systemd --user`
+### 5. Optional: Auto-start in `~/.bashrc` or via `systemd --user`
+
+Because `eval "$(pixel-ssh-agent-bridge)"` is idempotent, you can simply add one line to `~/.bashrc`:
+
+```bash
+if command -v pixel-ssh-agent-bridge >/dev/null 2>&1; then
+    eval "$(pixel-ssh-agent-bridge)" >/dev/null
+fi
+```
+
+Alternatively, if you prefer a `systemd --user` service (`pixel-ssh-agent-bridge -D` / `run`):
 
 ```bash
 mkdir -p ~/.config/systemd/user
 cp ~/debian-bridge/systemd/pixel-ssh-agent-bridge.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now pixel-ssh-agent-bridge.service
-```
-
-Add to `~/.bashrc`:
-```bash
-if command -v pixel-ssh-agent-bridge >/dev/null 2>&1; then
-    eval "$(pixel-ssh-agent-bridge print-env 2>/dev/null)"
-fi
 ```
 
 ---

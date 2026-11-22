@@ -5,18 +5,33 @@ mod unix_agent;
 
 use config::BridgeConfig;
 use std::env;
-use std::path::PathBuf;
-use std::process;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::process::{self, Command, Stdio};
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 use tunnel::BridgeHub;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellFormat {
+    Bourne,
+    Csh,
+}
 
 fn print_usage() {
     eprintln!(
         "pixel-ssh-agent-bridge — Encrypted SSH-Agent Bridge for Pixel Linux Terminal (AVF)\n\n\
-         USAGE:\n\
+         SSH-AGENT COMPATIBLE USAGE (starts daemon in background & prints shell env):\n\
+           eval \"$(pixel-ssh-agent-bridge)\"\n\
+           eval \"$(pixel-ssh-agent-bridge -s [-a <SOCKET>] [--port <PORT>] [--psk <64-HEX>])\"\n\
+           eval \"$(pixel-ssh-agent-bridge -k)\"          # stop running bridge daemon\n\
+           pixel-ssh-agent-bridge -D                    # run in foreground (like ssh-agent -D)\n\n\
+         EXPLICIT SUBCOMMANDS:\n\
            pixel-ssh-agent-bridge init      [--port <PORT>] [--psk <64-HEX>] [--socket <PATH>] [--config <PATH>]\n\
            pixel-ssh-agent-bridge run       [--config <PATH>] [--bind <ADDR:PORT>] [--socket <PATH>]\n\
+           pixel-ssh-agent-bridge stop      [--config <PATH>]\n\
            pixel-ssh-agent-bridge print-env [--config <PATH>]\n\
            pixel-ssh-agent-bridge test-live [--port <PORT>] [--psk <64-HEX>] [--config <PATH>]\n"
     );
@@ -24,21 +39,20 @@ fn print_usage() {
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
-    if args.is_empty() {
-        print_usage();
-        process::exit(2);
-    }
 
-    let res = match args[0].as_str() {
-        "init" => cmd_init(&args[1..]),
-        "run" => cmd_run(&args[1..]),
-        "print-env" => cmd_print_env(&args[1..]),
-        "test-live" => cmd_test_live(&args[1..]),
-        "-h" | "--help" | "help" => {
+    let res = match args.first().map(String::as_str) {
+        None => cmd_ssh_agent_mode(&[]),
+        Some("init") => cmd_init(&args[1..]),
+        Some("run") => cmd_run(&args[1..]),
+        Some("stop") => cmd_kill(&args[1..], ShellFormat::Bourne),
+        Some("print-env") => cmd_print_env(&args[1..]),
+        Some("test-live") => cmd_test_live(&args[1..]),
+        Some("-h" | "--help" | "help") => {
             print_usage();
             Ok(())
         }
-        other => {
+        Some(first) if first.starts_with('-') => cmd_ssh_agent_mode(&args),
+        Some(other) => {
             eprintln!("Unknown subcommand: {other}\n");
             print_usage();
             process::exit(2);
@@ -51,7 +65,258 @@ fn main() {
     }
 }
 
-fn cmd_init(args: &[String]) -> std::io::Result<()> {
+/// Behaves like OpenSSH `ssh-agent`:
+/// - Ensures the bridge daemon is running in the background (idempotent if already active)
+/// - Prints `SSH_AUTH_SOCK=...; export SSH_AUTH_SOCK; SSH_AGENT_PID=...; export SSH_AGENT_PID;`
+/// - Supports `-s` (Bourne shell), `-c` (C-shell), `-k` (kill), `-D`/`-d` (foreground), `-a <sock>`,
+///   plus optional `--port` and `--psk` to initialize config on the fly.
+fn cmd_ssh_agent_mode(args: &[String]) -> io::Result<()> {
+    let mut shell = ShellFormat::Bourne;
+    let mut kill_mode = false;
+    let mut foreground_mode = false;
+    let mut config_path = BridgeConfig::default_config_path();
+    let mut socket_override: Option<PathBuf> = None;
+    let mut port_override: Option<u16> = None;
+    let mut psk_override: Option<String> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-s" => shell = ShellFormat::Bourne,
+            "-c" => shell = ShellFormat::Csh,
+            "-k" => kill_mode = true,
+            "-D" | "-d" => foreground_mode = true,
+            "-a" | "--socket" => {
+                i += 1;
+                let raw = args.get(i).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "-a/--socket requires a path")
+                })?;
+                socket_override = Some(PathBuf::from(raw));
+            }
+            "--port" => {
+                i += 1;
+                let raw = args.get(i).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "--port requires a value")
+                })?;
+                port_override = Some(raw.parse().map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "Invalid port number")
+                })?);
+            }
+            "--psk" => {
+                i += 1;
+                psk_override = Some(
+                    args.get(i)
+                        .ok_or_else(|| {
+                            io::Error::new(io::ErrorKind::InvalidInput, "--psk requires a value")
+                        })?
+                        .clone(),
+                );
+            }
+            "--config" => {
+                i += 1;
+                let raw = args.get(i).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "--config requires a value")
+                })?;
+                config_path = PathBuf::from(raw);
+            }
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Unknown option: {other}"),
+                ));
+            }
+        }
+        i += 1;
+    }
+
+    if kill_mode {
+        return cmd_kill_with_config(&config_path, socket_override.as_deref(), shell);
+    }
+
+    // If --psk was supplied, initialize or update the config file automatically.
+    if let Some(ref psk_hex) = psk_override {
+        let psk = BridgeConfig::parse_psk_hex(psk_hex)?;
+        let existing = BridgeConfig::load(&config_path).ok();
+        let bind_addr = match port_override {
+            Some(p) => format!("0.0.0.0:{p}"),
+            None => existing
+                .as_ref()
+                .map(|c| c.bind_addr.clone())
+                .unwrap_or_else(|| "0.0.0.0:22999".to_string()),
+        };
+        let socket_path = socket_override
+            .clone()
+            .or_else(|| existing.map(|c| c.socket_path))
+            .unwrap_or_else(BridgeConfig::default_socket_path);
+        let new_cfg = BridgeConfig {
+            bind_addr,
+            socket_path,
+            psk,
+        };
+        new_cfg.save(&config_path)?;
+    }
+
+    let mut cfg = BridgeConfig::load(&config_path)?;
+    if let Some(port) = port_override {
+        cfg.bind_addr = format!("0.0.0.0:{port}");
+    }
+    if let Some(sock) = socket_override {
+        cfg.socket_path = sock;
+    }
+
+    if foreground_mode {
+        return run_foreground_server(cfg);
+    }
+
+    // Check if an instance is already listening on the Unix socket (idempotent behavior for .bashrc).
+    let pid_path = pid_file_path(&cfg.socket_path);
+    if is_socket_alive(&cfg.socket_path) {
+        let existing_pid = read_pid_file(&pid_path).unwrap_or_else(process::id);
+        print_agent_env(&cfg.socket_path, existing_pid, shell);
+        return Ok(());
+    }
+
+    // Spawn detached background daemon with stdio redirected to /dev/null so `$(...)` never hangs.
+    let exe = env::current_exe()?;
+    let mut child = Command::new(exe)
+        .arg("run")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--bind")
+        .arg(&cfg.bind_addr)
+        .arg("--socket")
+        .arg(&cfg.socket_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+
+    let pid = child.id();
+    let _ = write_pid_file(&pid_path, pid);
+
+    // Wait briefly (up to 600ms) for the Unix socket to become ready or report early startup errors.
+    for _ in 0..30 {
+        if is_socket_alive(&cfg.socket_path) {
+            break;
+        }
+        if let Some(status) = child.try_wait()? {
+            let _ = fs::remove_file(&pid_path);
+            return Err(io::Error::other(format!(
+                "Bridge daemon exited early with {status} (check if port in {} is already in use)",
+                cfg.bind_addr
+            )));
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    print_agent_env(&cfg.socket_path, pid, shell);
+    Ok(())
+}
+
+fn print_agent_env(socket_path: &Path, pid: u32, shell: ShellFormat) {
+    let sock = socket_path.display();
+    match shell {
+        ShellFormat::Bourne => {
+            println!("SSH_AUTH_SOCK={sock}; export SSH_AUTH_SOCK;");
+            println!("SSH_AGENT_PID={pid}; export SSH_AGENT_PID;");
+            println!("echo Agent pid {pid};");
+        }
+        ShellFormat::Csh => {
+            println!("setenv SSH_AUTH_SOCK {sock};");
+            println!("setenv SSH_AGENT_PID {pid};");
+            println!("echo Agent pid {pid};");
+        }
+    }
+}
+
+fn pid_file_path(socket_path: &Path) -> PathBuf {
+    let mut os = socket_path.as_os_str().to_os_string();
+    os.push(".pid");
+    PathBuf::from(os)
+}
+
+fn write_pid_file(pid_path: &Path, pid: u32) -> io::Result<()> {
+    if let Some(parent) = pid_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(pid_path, format!("{pid}\n"))
+}
+
+fn read_pid_file(pid_path: &Path) -> Option<u32> {
+    fs::read_to_string(pid_path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+}
+
+fn is_socket_alive(socket_path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        std::os::unix::net::UnixStream::connect(socket_path).is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        socket_path.exists()
+    }
+}
+
+fn cmd_kill(args: &[String], shell: ShellFormat) -> io::Result<()> {
+    let config_path = parse_config_path(args)?;
+    cmd_kill_with_config(&config_path, None, shell)
+}
+
+fn cmd_kill_with_config(
+    config_path: &Path,
+    socket_override: Option<&Path>,
+    shell: ShellFormat,
+) -> io::Result<()> {
+    let socket_path = match socket_override {
+        Some(p) => p.to_path_buf(),
+        None => BridgeConfig::load(config_path)
+            .map(|c| c.socket_path)
+            .unwrap_or_else(|_| BridgeConfig::default_socket_path()),
+    };
+    let pid_path = pid_file_path(&socket_path);
+
+    let pid = env::var("SSH_AGENT_PID")
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .or_else(|| read_pid_file(&pid_path))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "SSH_AGENT_PID not set and no PID file found",
+            )
+        })?;
+
+    #[cfg(unix)]
+    {
+        let _ = Command::new("kill")
+            .arg(pid.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+
+    let _ = fs::remove_file(&socket_path);
+    let _ = fs::remove_file(&pid_path);
+
+    match shell {
+        ShellFormat::Bourne => {
+            println!("unset SSH_AUTH_SOCK;");
+            println!("unset SSH_AGENT_PID;");
+            println!("echo Agent pid {pid} killed;");
+        }
+        ShellFormat::Csh => {
+            println!("unsetenv SSH_AUTH_SOCK;");
+            println!("unsetenv SSH_AGENT_PID;");
+            println!("echo Agent pid {pid} killed;");
+        }
+    }
+    Ok(())
+}
+
+fn cmd_init(args: &[String]) -> io::Result<()> {
     let mut port: u16 = 22999;
     let mut psk_arg: Option<String> = None;
     let mut socket_path = BridgeConfig::default_socket_path();
@@ -63,10 +328,10 @@ fn cmd_init(args: &[String]) -> std::io::Result<()> {
             "--port" => {
                 i += 1;
                 let raw = args.get(i).ok_or_else(|| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "--port requires a value")
+                    io::Error::new(io::ErrorKind::InvalidInput, "--port requires a value")
                 })?;
                 port = raw.parse().map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid port number")
+                    io::Error::new(io::ErrorKind::InvalidInput, "Invalid port number")
                 })?;
             }
             "--psk" => {
@@ -74,10 +339,7 @@ fn cmd_init(args: &[String]) -> std::io::Result<()> {
                 psk_arg = Some(
                     args.get(i)
                         .ok_or_else(|| {
-                            std::io::Error::new(
-                                std::io::ErrorKind::InvalidInput,
-                                "--psk requires a value",
-                            )
+                            io::Error::new(io::ErrorKind::InvalidInput, "--psk requires a value")
                         })?
                         .clone(),
                 );
@@ -85,26 +347,20 @@ fn cmd_init(args: &[String]) -> std::io::Result<()> {
             "--socket" => {
                 i += 1;
                 let raw = args.get(i).ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "--socket requires a value",
-                    )
+                    io::Error::new(io::ErrorKind::InvalidInput, "--socket requires a value")
                 })?;
                 socket_path = PathBuf::from(raw);
             }
             "--config" => {
                 i += 1;
                 let raw = args.get(i).ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "--config requires a value",
-                    )
+                    io::Error::new(io::ErrorKind::InvalidInput, "--config requires a value")
                 })?;
                 config_path = PathBuf::from(raw);
             }
             other => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
                     format!("Unknown option: {other}"),
                 ));
             }
@@ -130,23 +386,27 @@ fn cmd_init(args: &[String]) -> std::io::Result<()> {
     println!("Pairing PSK:     {}", hex::encode(cfg.psk));
     println!();
     println!("Next steps:");
-    println!("  1. Enable port forwarding for port {port} in Pixel Linux Terminal settings.");
-    println!("  2. Start the bridge:   pixel-ssh-agent-bridge run");
-    println!(
-        "  3. Export in shell:    export SSH_AUTH_SOCK=\"{}\"",
-        cfg.socket_path.display()
-    );
+    println!("  1. Start & export (like ssh-agent):  eval \"$(pixel-ssh-agent-bridge)\"");
+    println!("  2. Enable port forwarding for port {port} in Pixel Linux Terminal settings.");
     Ok(())
 }
 
-fn cmd_print_env(args: &[String]) -> std::io::Result<()> {
+fn cmd_print_env(args: &[String]) -> io::Result<()> {
     let config_path = parse_config_path(args)?;
     let cfg = BridgeConfig::load(&config_path)?;
-    println!("export SSH_AUTH_SOCK=\"{}\"", cfg.socket_path.display());
+    let pid = read_pid_file(&pid_file_path(&cfg.socket_path)).unwrap_or(0);
+    if pid > 0 {
+        print_agent_env(&cfg.socket_path, pid, ShellFormat::Bourne);
+    } else {
+        println!(
+            "SSH_AUTH_SOCK={}; export SSH_AUTH_SOCK;",
+            cfg.socket_path.display()
+        );
+    }
     Ok(())
 }
 
-fn cmd_run(args: &[String]) -> std::io::Result<()> {
+fn cmd_run(args: &[String]) -> io::Result<()> {
     let mut config_path = BridgeConfig::default_config_path();
     let mut bind_override: Option<String> = None;
     let mut socket_override: Option<PathBuf> = None;
@@ -157,10 +417,7 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
             "--config" => {
                 i += 1;
                 config_path = PathBuf::from(args.get(i).ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "--config requires a value",
-                    )
+                    io::Error::new(io::ErrorKind::InvalidInput, "--config requires a value")
                 })?);
             }
             "--bind" => {
@@ -168,10 +425,7 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
                 bind_override = Some(
                     args.get(i)
                         .ok_or_else(|| {
-                            std::io::Error::new(
-                                std::io::ErrorKind::InvalidInput,
-                                "--bind requires a value",
-                            )
+                            io::Error::new(io::ErrorKind::InvalidInput, "--bind requires a value")
                         })?
                         .clone(),
                 );
@@ -179,15 +433,12 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
             "--socket" => {
                 i += 1;
                 socket_override = Some(PathBuf::from(args.get(i).ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "--socket requires a value",
-                    )
+                    io::Error::new(io::ErrorKind::InvalidInput, "--socket requires a value")
                 })?));
             }
             other => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
                     format!("Unknown option: {other}"),
                 ));
             }
@@ -203,6 +454,10 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
         cfg.socket_path = sock;
     }
 
+    run_foreground_server(cfg)
+}
+
+fn run_foreground_server(cfg: BridgeConfig) -> io::Result<()> {
     let hub = Arc::new(BridgeHub::new());
     let tcp_hub = Arc::clone(&hub);
     let bind_addr = cfg.bind_addr.clone();
@@ -221,24 +476,23 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
     }
     #[cfg(not(unix))]
     {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
+        let _ = cfg.socket_path;
+        let _ = hub;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
             "Unix domain SSH_AUTH_SOCK server requires Linux/Unix (run inside Pixel Debian VM)",
         ))
     }
 }
 
-fn parse_config_path(args: &[String]) -> std::io::Result<PathBuf> {
+fn parse_config_path(args: &[String]) -> io::Result<PathBuf> {
     let mut config_path = BridgeConfig::default_config_path();
     let mut i = 0;
     while i < args.len() {
         if args[i] == "--config" {
             i += 1;
             let raw = args.get(i).ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "--config requires a value",
-                )
+                io::Error::new(io::ErrorKind::InvalidInput, "--config requires a value")
             })?;
             config_path = PathBuf::from(raw);
         }
@@ -249,13 +503,11 @@ fn parse_config_path(args: &[String]) -> std::io::Result<PathBuf> {
 
 /// Cross-platform live integration test against a running Android app (emulator or device).
 /// Listens on TCP, performs the PSA1 handshake, tests Ping/Pong, REQUEST_IDENTITIES, and SIGN_REQUEST.
-fn cmd_test_live(args: &[String]) -> std::io::Result<()> {
+fn cmd_test_live(args: &[String]) -> io::Result<()> {
     use crate::crypto::{handshake_server, Psa1Reader, Psa1Writer};
     use crate::tunnel::TunnelFrame;
     use sha2::{Digest, Sha256};
-    use std::io;
     use std::net::TcpListener;
-    use std::time::Duration;
 
     let mut port: u16 = 22999;
     let mut psk_arg: Option<String> = None;
@@ -448,10 +700,10 @@ fn cmd_test_live(args: &[String]) -> std::io::Result<()> {
     Ok(())
 }
 
-fn read_u32_be(buf: &[u8], pos: &mut usize) -> std::io::Result<u32> {
+fn read_u32_be(buf: &[u8], pos: &mut usize) -> io::Result<u32> {
     if *pos + 4 > buf.len() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
             "Unexpected EOF reading uint32",
         ));
     }
@@ -460,11 +712,11 @@ fn read_u32_be(buf: &[u8], pos: &mut usize) -> std::io::Result<u32> {
     Ok(val)
 }
 
-fn read_ssh_bytes(buf: &[u8], pos: &mut usize) -> std::io::Result<Vec<u8>> {
+fn read_ssh_bytes(buf: &[u8], pos: &mut usize) -> io::Result<Vec<u8>> {
     let len = read_u32_be(buf, pos)? as usize;
     if *pos + len > buf.len() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
             "Unexpected EOF reading ssh string",
         ));
     }
