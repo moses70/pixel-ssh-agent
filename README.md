@@ -7,6 +7,10 @@ A **from-scratch SSH agent for Android** designed specifically for the built-in 
 
 Private SSH keys never enter the Debian VM. They remain on the Android host—backed by **Android Keystore / StrongBox** (ECDSA P-256) or Keystore-AES-GCM envelope encryption (Ed25519)—and can require interactive **BiometricPrompt** confirmation per signature. A lightweight, zero-C-dependency **Rust bridge** inside Debian exposes a standard `SSH_AUTH_SOCK` Unix socket to `ssh`, `git`, `scp`, and `ssh-add`.
 
+<p align="center">
+  <img src="docs/images/tunnel-connected.jpg" alt="Pixel SSH Agent connected to Debian VM with active biometric unlock countdown" width="320" />
+</p>
+
 ---
 
 ## Architecture (Reverse TCP over AVF Port Forwarding)
@@ -36,13 +40,14 @@ Why reverse TCP over AVF port forwarding?
 ## Features (MVP)
 
 - **OpenSSH Agent Protocol from scratch** (`draft-miller-ssh-agent`: `REQUEST_IDENTITIES`, `SIGN_REQUEST`, RFC 4251 wire codec, SHA-256 fingerprints, `authorized_keys` export)
-- **Key algorithms:**
+- **Key algorithms & import:**
   - `ecdsa-sha2-nistp256` — Hardware-backed via Android Keystore / StrongBox (DER → OpenSSH wire conversion)
   - `ssh-ed25519` — Pure-Kotlin RFC 8032 implementation with 32-byte private seeds wrapped by an Android Keystore AES-256-GCM master key
+  - **OpenSSH private key import** — Load from file or paste `-----BEGIN OPENSSH PRIVATE KEY-----` (plain or `bcrypt_pbkdf` passphrase-encrypted `aes256-ctr` / `aes256-gcm@openssh.com`), encrypted at rest with the Android Keystore master key
 - **Authenticated & encrypted tunnel (`PSA1`):**
   - Ephemeral X25519 (RFC 7748) + 256-bit PSK + HKDF-SHA256 (RFC 5869) + directional AES-256-GCM with implicit sequence nonces and AAD
   - Multiplexed channels (`OPEN` / `DATA` / `CLOSE` / `PING` / `PONG`) for concurrent SSH sessions
-- **Biometric confirmation:** Interactive approval via Android `BiometricPrompt` with optional unlock window (`Every sign` / `1 min` / `5 min` / `15 min`)
+- **Biometric confirmation:** Interactive approval via Android `BiometricPrompt` with optional unlock window (`Every sign` / `1 min` / `5 min` / `15 min` / `30 min`), live countdown, and instant **Lock Now** button
 - **Cross-language test parity:** Deterministic `PSA1` key-derivation test vectors verified identically in both Kotlin and Rust unit tests
 
 ---

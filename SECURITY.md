@@ -17,7 +17,7 @@
    - Future releases plan to prefer Android 13+ (API 33+) native JCA/Conscrypt `X25519` and `Ed25519` providers where available.
 2. **Project Maturity:**
    - This project is currently an early MVP (`0.1.0`). It has not undergone an independent third-party cryptographic audit.
-   - Current live verification has been performed with the Android Emulator (`emulator-5554`) and the Rust bridge (`test-live`); end-to-end testing inside a physical Pixel AVF Debian VM is the next milestone.
+   - End-to-end verification has been performed on both the Android Emulator (`test-live`) and a physical Pixel 9a running the built-in AVF Debian Linux Terminal.
 
 ## Reporting a Vulnerability
 
