@@ -14,10 +14,14 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -37,6 +41,8 @@ import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Key
@@ -354,6 +360,7 @@ private fun PendingApprovalBanner(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun TunnelAndPairingTab(
     settings: AgentSettings,
@@ -365,9 +372,12 @@ private fun TunnelAndPairingTab(
     onStopService: () -> Unit,
 ) {
     val context = LocalContext.current
+    var settingsExpanded by remember { mutableStateOf(false) }
     var portText by remember(settings.port) { mutableStateOf(settings.port.toString()) }
     var pskText by remember(settings.pskHex) { mutableStateOf(settings.pskHex) }
     var unlockMinutes by remember(settings.unlockWindowMinutes) { mutableIntStateOf(settings.unlockWindowMinutes) }
+
+    val unlockSummary = if (settings.unlockWindowMinutes == 0) "Every sign" else "${settings.unlockWindowMinutes} min"
 
     val running = connectionState != TunnelConnectionState.STOPPED
     val statusColor = when (connectionState) {
@@ -430,74 +440,115 @@ private fun TunnelAndPairingTab(
         }
 
         Card(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("AVF Tunnel & Pairing (Option B)", style = MaterialTheme.typography.titleMedium)
-                Text(
-                    "Allow port forwarding for this port in Pixel Linux Terminal settings. " +
-                        "Android maps it strictly to 127.0.0.1.",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-
-                OutlinedTextField(
-                    value = portText,
-                    onValueChange = { portText = it.filter(Char::isDigit).take(5) },
-                    label = { Text("AVF Forwarded Port (127.0.0.1)") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-
-                OutlinedTextField(
-                    value = pskText,
-                    onValueChange = { pskText = it.trim().lowercase() },
-                    label = { Text("Pairing PSK (64 hex chars / 256-bit)") },
-                    textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                    maxLines = 2,
-                    trailingIcon = {
-                        IconButton(onClick = { pskText = onRegeneratePsk() }) {
-                            Icon(Icons.Default.Refresh, contentDescription = "Regenerate PSK")
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { settingsExpanded = !settingsExpanded }
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("AVF Tunnel & Pairing", style = MaterialTheme.typography.titleMedium)
+                        if (!settingsExpanded) {
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                "Port ${settings.port} • Unlock: $unlockSummary",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-
-                Text("Biometric Unlock Window", style = MaterialTheme.typography.labelLarge)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(0 to "Every sign", 1 to "1 min", 5 to "5 min", 15 to "15 min").forEach { (mins, label) ->
-                        FilterChip(
-                            selected = unlockMinutes == mins,
-                            onClick = { unlockMinutes = mins },
-                            label = { Text(label) },
-                        )
                     }
+                    Icon(
+                        imageVector = if (settingsExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                        contentDescription = if (settingsExpanded) "Collapse settings" else "Expand settings",
+                    )
                 }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        onClick = {
-                            val parsedPort = portText.toIntOrNull() ?: settings.port
-                            onSaveSettings(
-                                settings.copy(
-                                    port = parsedPort,
-                                    pskHex = pskText,
-                                    unlockWindowMinutes = unlockMinutes,
-                                ),
-                            )
-                            Toast.makeText(context, "Settings saved", Toast.LENGTH_SHORT).show()
-                        },
+                AnimatedVisibility(visible = settingsExpanded) {
+                    Column(
+                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        Text("Save")
-                    }
-                    OutlinedButton(
-                        onClick = {
-                            val parsedPort = portText.toIntOrNull() ?: settings.port
-                            val cmd = "pixel-ssh-agent-bridge init --port $parsedPort --psk $pskText"
-                            copyToClipboard(context, "Debian Bridge Init Command", cmd)
-                        },
-                    ) {
-                        Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Copy Debian Init")
+                        Text(
+                            "Allow port forwarding for this port in Pixel Linux Terminal settings. " +
+                                "Android maps it strictly to 127.0.0.1.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+
+                        OutlinedTextField(
+                            value = portText,
+                            onValueChange = { portText = it.filter(Char::isDigit).take(5) },
+                            label = { Text("AVF Forwarded Port (127.0.0.1)") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+
+                        OutlinedTextField(
+                            value = pskText,
+                            onValueChange = { pskText = it.trim().lowercase() },
+                            label = { Text("Pairing PSK (64 hex chars / 256-bit)") },
+                            textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                            maxLines = 2,
+                            trailingIcon = {
+                                IconButton(onClick = { pskText = onRegeneratePsk() }) {
+                                    Icon(Icons.Default.Refresh, contentDescription = "Regenerate PSK")
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+
+                        Text("Biometric Unlock Window", style = MaterialTheme.typography.labelLarge)
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            listOf(
+                                0 to "Every sign",
+                                1 to "1 min",
+                                5 to "5 min",
+                                15 to "15 min",
+                                30 to "30 min",
+                            ).forEach { (mins, label) ->
+                                FilterChip(
+                                    selected = unlockMinutes == mins,
+                                    onClick = { unlockMinutes = mins },
+                                    label = { Text(label) },
+                                )
+                            }
+                        }
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = {
+                                    val parsedPort = portText.toIntOrNull() ?: settings.port
+                                    onSaveSettings(
+                                        settings.copy(
+                                            port = parsedPort,
+                                            pskHex = pskText,
+                                            unlockWindowMinutes = unlockMinutes,
+                                        ),
+                                    )
+                                    settingsExpanded = false
+                                    Toast.makeText(context, "Settings saved", Toast.LENGTH_SHORT).show()
+                                },
+                            ) {
+                                Text("Save")
+                            }
+                            OutlinedButton(
+                                onClick = {
+                                    val parsedPort = portText.toIntOrNull() ?: settings.port
+                                    val cmd = "pixel-ssh-agent-bridge init --port $parsedPort --psk $pskText"
+                                    copyToClipboard(context, "Debian Bridge Init Command", cmd)
+                                },
+                            ) {
+                                Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Copy Debian Init")
+                            }
+                        }
                     }
                 }
             }
