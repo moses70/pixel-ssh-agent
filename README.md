@@ -143,6 +143,51 @@ systemctl --user daemon-reload
 systemctl --user enable --now pixel-ssh-agent-bridge.service
 ```
 
+### 6. Optional: Agent "borrow" for a next level of agent forwarding
+
+Agent forwarding is very nice when the agent lives on you main workstation. But with pixel-ssh-agent,
+a little bit more freedom would be nice.
+You can add this snippet to the .bashrc of your main workstation: With it, the SSH_AUTH_SOCK will be cached in a file '~/.pixel_auth'
+and every new session will have the socket as well.
+A 'key' symbol 🔑 is added to the prompt to make this always visible.
+
+```bash
+# Borrow ssh-agent
+alias psa-exists='ssh-add -l 2>/dev/null | grep DroidKey >/dev/null'
+if (psa-exists)
+then
+        echo "export SSH_AUTH_SOCK=$SSH_AUTH_SOCK" > ~/.pixel_auth
+        chmod 600 ~/.pixel_auth
+        PIXEL_AUTH=1
+elif [ -f ~/.pixel_auth ]
+then
+        . ~/.pixel_auth
+        if (psa-exists)
+        then
+               PIXEL_AUTH=1
+        else
+               rm ~/.pixel_auth
+        fi
+fi
+
+if [ -n "$PIXEL_AUTH" ]
+then
+        PS1="🔑 $PS1"
+fi
+```
+
+And this addition to .ssh/config allows to activate the bridge with only one command:
+```
+# Goes to the pixel and back, activating agent forwarding (with borrow, see above):
+Host pb
+    Hostname pixel.the-tail-net-name.ts.net
+    User droid
+    HostKeyAlias MyPixel
+    RequestTTY yes
+    ForwardAgent no
+    RemoteCommand bash -lc 'eval "$(pixel-ssh-agent-bridge)" >/dev/null && exec ssh zen'
+```
+
 ---
 
 ## Live Testing Against an Android Emulator (Without a Pixel VM)
