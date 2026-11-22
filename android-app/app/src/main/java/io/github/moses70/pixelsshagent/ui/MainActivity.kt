@@ -1,13 +1,16 @@
 package io.github.moses70.pixelsshagent.ui
 
 import android.Manifest
+import android.app.NotificationManager
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -76,6 +79,7 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -84,6 +88,9 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -119,6 +126,7 @@ class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         coordinator = AgentCoordinator.get(this)
+        handleWakeIntent(intent)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
@@ -135,9 +143,28 @@ class MainActivity : FragmentActivity() {
                     onStartService = { AgentForegroundService.start(this) },
                     onStopService = { AgentForegroundService.stop(this) },
                     onTriggerBiometric = { request -> launchBiometricPrompt(request) },
+                    onLockScreenWakeupChanged = { enabled -> updateLockScreenWakeup(enabled) },
                 )
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleWakeIntent(intent)
+    }
+
+    private fun handleWakeIntent(intent: Intent?) {
+        val isSignWake = intent?.getBooleanExtra(AgentForegroundService.EXTRA_SIGN_REQUEST, false) == true
+        if (isSignWake || coordinator.pendingSignRequest.value != null) {
+            updateLockScreenWakeup(true)
+        }
+    }
+
+    private fun updateLockScreenWakeup(enabled: Boolean) {
+        setShowWhenLocked(enabled)
+        setTurnScreenOn(enabled)
     }
 
     private fun launchBiometricPrompt(request: PendingSignRequest) {
@@ -199,6 +226,7 @@ private fun AgentAppScreen(
     onStartService: () -> Unit,
     onStopService: () -> Unit,
     onTriggerBiometric: (PendingSignRequest) -> Unit,
+    onLockScreenWakeupChanged: (Boolean) -> Unit,
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
     var showCreateKeyDialog by remember { mutableStateOf(false) }
@@ -214,6 +242,7 @@ private fun AgentAppScreen(
     val context = LocalContext.current
 
     LaunchedEffect(pendingSign?.requestId) {
+        onLockScreenWakeupChanged(pendingSign != null)
         pendingSign?.let { onTriggerBiometric(it) }
     }
 
@@ -407,6 +436,28 @@ private fun TunnelAndPairingTab(
 
     val unlockSummary = if (settings.unlockWindowMinutes == 0) "Every sign" else "${settings.unlockWindowMinutes} min"
 
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var canUseFullScreenIntent by remember {
+        mutableStateOf(
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                context.getSystemService(NotificationManager::class.java)?.canUseFullScreenIntent() == true
+            } else {
+                true
+            },
+        )
+    }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME && Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                canUseFullScreenIntent =
+                    context.getSystemService(NotificationManager::class.java)?.canUseFullScreenIntent() == true
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     val running = connectionState != TunnelConnectionState.STOPPED
     val statusColor = when (connectionState) {
         TunnelConnectionState.CONNECTED -> Color(0xFF2E7D32)
@@ -482,6 +533,36 @@ private fun TunnelAndPairingTab(
                             Spacer(Modifier.width(6.dp))
                             Text("Lock Now")
                         }
+                    }
+                }
+            }
+        }
+
+        if (!canUseFullScreenIntent && Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Wake Screen on Sign Requests",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        "Allow full-screen notifications so SSH sign prompts can wake the screen while locked.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    OutlinedButton(
+                        onClick = {
+                            val intent = Intent(
+                                Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,
+                                Uri.parse("package:${context.packageName}"),
+                            )
+                            context.startActivity(intent)
+                        },
+                    ) {
+                        Text("Allow Full-Screen Alerts")
                     }
                 }
             }

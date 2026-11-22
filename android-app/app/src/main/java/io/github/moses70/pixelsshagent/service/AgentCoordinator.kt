@@ -68,6 +68,9 @@ class AgentCoordinator private constructor(context: Context) : SshAgentBackend {
     @Volatile
     var onSignPromptRequested: ((PendingSignRequest) -> Unit)? = null
 
+    @Volatile
+    var onSignPromptDismissed: (() -> Unit)? = null
+
     fun updateSettings(newSettings: AgentSettings) {
         settingsStore.save(newSettings)
         val loaded = settingsStore.load()
@@ -143,6 +146,7 @@ class AgentCoordinator private constructor(context: Context) : SshAgentBackend {
             }
             pending.decision.complete(approved)
             _pendingSignRequest.value = null
+            onSignPromptDismissed?.invoke()
         }
     }
 
@@ -217,6 +221,7 @@ class AgentCoordinator private constructor(context: Context) : SshAgentBackend {
             val result = withTimeoutOrNull(APPROVAL_TIMEOUT_MS) { deferred.await() } ?: false
             if (_pendingSignRequest.value?.requestId == request.requestId) {
                 _pendingSignRequest.value = null
+                onSignPromptDismissed?.invoke()
             }
             result
         }

@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import io.github.moses70.pixelsshagent.ssh.SshAgentDispatcher
 import io.github.moses70.pixelsshagent.tunnel.TunnelClient
@@ -44,6 +45,9 @@ class AgentForegroundService : Service() {
         coordinator.onSignPromptRequested = { request ->
             showSignApprovalNotification(request)
         }
+        coordinator.onSignPromptDismissed = {
+            notificationManager.cancel(NOTIF_ID_SIGN_PROMPT)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -74,6 +78,7 @@ class AgentForegroundService : Service() {
 
     override fun onDestroy() {
         coordinator.onSignPromptRequested = null
+        coordinator.onSignPromptDismissed = null
         stopTunnel()
         serviceScope.cancel()
         super.onDestroy()
@@ -165,11 +170,14 @@ class AgentForegroundService : Service() {
     }
 
     private fun showSignApprovalNotification(request: PendingSignRequest) {
+        wakeScreenBriefly()
+
         val openIntent = PendingIntent.getActivity(
             this,
             2,
             Intent(this, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                putExtra(EXTRA_SIGN_REQUEST, true)
             },
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
@@ -189,13 +197,31 @@ class AgentForegroundService : Service() {
             .setContentText("Tap to verify with biometrics (${request.algorithm.sshName})")
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setAutoCancel(true)
             .setTimeoutAfter(60_000L)
             .setContentIntent(openIntent)
+            .setFullScreenIntent(openIntent, true)
             .addAction(android.R.drawable.ic_delete, "Deny", denyIntent)
             .build()
 
         notificationManager.notify(NOTIF_ID_SIGN_PROMPT, notif)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun wakeScreenBriefly() {
+        runCatching {
+            val pm = getSystemService(PowerManager::class.java) ?: return
+            if (!pm.isInteractive) {
+                val wakeLock = pm.newWakeLock(
+                    PowerManager.SCREEN_BRIGHT_WAKE_LOCK or
+                        PowerManager.ACQUIRE_CAUSES_WAKEUP or
+                        PowerManager.ON_AFTER_RELEASE,
+                    "pixelsshagent:sign_wakeup",
+                )
+                wakeLock.acquire(5_000L)
+            }
+        }
     }
 
     private fun createNotificationChannels() {
@@ -212,6 +238,7 @@ class AgentForegroundService : Service() {
             NotificationManager.IMPORTANCE_HIGH,
         ).apply {
             description = "Biometric confirmation prompts for SSH authentication"
+            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
         }
         notificationManager.createNotificationChannel(statusChannel)
         notificationManager.createNotificationChannel(signChannel)
@@ -227,6 +254,7 @@ class AgentForegroundService : Service() {
         const val ACTION_STOP = "io.github.moses70.pixelsshagent.action.STOP"
         const val ACTION_DENY_SIGN = "io.github.moses70.pixelsshagent.action.DENY_SIGN"
         const val EXTRA_REQUEST_ID = "request_id"
+        const val EXTRA_SIGN_REQUEST = "sign_request"
 
         fun start(context: Context) {
             val intent = Intent(context, AgentForegroundService::class.java).setAction(ACTION_START)
