@@ -25,18 +25,34 @@ const SSH_AGENT_FAILURE_MSG: &[u8] = &[0, 0, 0, 1, 5];
 const SIGN_RESPONSE_TIMEOUT: Duration = Duration::from_secs(65);
 
 #[cfg(unix)]
-pub fn run_unix_agent_server(socket_path: &Path, hub: Arc<BridgeHub>) -> io::Result<()> {
+pub fn bind_unix_agent_socket(socket_path: &Path) -> io::Result<UnixListener> {
     if let Some(parent) = socket_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    if socket_path.exists() {
+
+    // Never unlink a socket that another live bridge instance is actively serving.
+    if UnixStream::connect(socket_path).is_ok() {
+        return Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            format!(
+                "Unix socket {} is already in use by a running bridge",
+                socket_path.display()
+            ),
+        ));
+    }
+
+    if fs::symlink_metadata(socket_path).is_ok() {
         fs::remove_file(socket_path)?;
     }
 
     let listener = UnixListener::bind(socket_path)?;
     fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600))?;
     eprintln!("[bridge] SSH_AUTH_SOCK ready at {}", socket_path.display());
+    Ok(listener)
+}
 
+#[cfg(unix)]
+pub fn serve_unix_agent(listener: UnixListener, hub: Arc<BridgeHub>) -> io::Result<()> {
     for incoming in listener.incoming() {
         match incoming {
             Ok(stream) => {
@@ -154,4 +170,37 @@ fn write_ssh_agent_message(stream: &mut UnixStream, payload: &[u8]) -> io::Resul
     stream.write_all(&(payload.len() as u32).to_be_bytes())?;
     stream.write_all(payload)?;
     stream.flush()
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::env;
+    use std::process;
+
+    #[test]
+    fn bind_refuses_to_unlink_active_socket_but_cleans_stale_socket() {
+        let dir = env::temp_dir().join(format!("psa-unix-test-{}", process::id()));
+        let sock = dir.join("agent.sock");
+        let _ = fs::remove_dir_all(&dir);
+
+        // First bind succeeds.
+        let first = bind_unix_agent_socket(&sock).expect("initial bind should succeed");
+
+        // Second bind while first listener is alive must fail with AddrInUse and keep socket intact.
+        let err = bind_unix_agent_socket(&sock).expect_err("second bind should fail");
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
+        assert!(
+            UnixStream::connect(&sock).is_ok(),
+            "first listener socket must remain connectable"
+        );
+
+        // After dropping the first listener, the stale socket file should be replaced cleanly.
+        drop(first);
+        let second = bind_unix_agent_socket(&sock).expect("re-bind over stale socket should work");
+        assert!(UnixStream::connect(&sock).is_ok());
+
+        drop(second);
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

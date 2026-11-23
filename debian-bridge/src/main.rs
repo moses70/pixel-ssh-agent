@@ -9,9 +9,11 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command, Stdio};
+#[cfg(unix)]
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+#[cfg(unix)]
 use tunnel::BridgeHub;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +77,7 @@ fn cmd_ssh_agent_mode(args: &[String]) -> io::Result<()> {
     let mut kill_mode = false;
     let mut foreground_mode = false;
     let mut config_path = BridgeConfig::default_config_path();
+    let mut config_overridden = false;
     let mut socket_override: Option<PathBuf> = None;
     let mut port_override: Option<u16> = None;
     let mut psk_override: Option<String> = None;
@@ -118,6 +121,7 @@ fn cmd_ssh_agent_mode(args: &[String]) -> io::Result<()> {
                     io::Error::new(io::ErrorKind::InvalidInput, "--config requires a value")
                 })?;
                 config_path = PathBuf::from(raw);
+                config_overridden = true;
             }
             other => {
                 return Err(io::Error::new(
@@ -156,6 +160,7 @@ fn cmd_ssh_agent_mode(args: &[String]) -> io::Result<()> {
         new_cfg.save(&config_path)?;
     }
 
+    let has_overrides = port_override.is_some() || socket_override.is_some() || config_overridden;
     let mut cfg = BridgeConfig::load(&config_path)?;
     if let Some(port) = port_override {
         cfg.bind_addr = format!("0.0.0.0:{port}");
@@ -168,15 +173,30 @@ fn cmd_ssh_agent_mode(args: &[String]) -> io::Result<()> {
         return run_foreground_server(cfg);
     }
 
-    // Check if an instance is already listening on the Unix socket (idempotent behavior for .bashrc).
+    // Fast path: check if an instance is already listening on the Unix socket (idempotent for .bashrc).
     let pid_path = pid_file_path(&cfg.socket_path);
     if is_socket_alive(&cfg.socket_path) {
-        let existing_pid = read_pid_file(&pid_path).unwrap_or_else(process::id);
-        print_agent_env(&cfg.socket_path, existing_pid, shell);
+        print_agent_env(&cfg.socket_path, read_pid_file(&pid_path), shell);
+        return Ok(());
+    }
+
+    // If systemd --user is already starting or running the default service (common right after VM
+    // boot when systemd and ~/.bashrc execute concurrently), wait briefly for its socket instead
+    // of spawning a competing daemon.
+    if !has_overrides
+        && is_systemd_unit_active_or_activating()
+        && wait_until_socket_alive(
+            &cfg.socket_path,
+            Duration::from_secs(3),
+            Duration::from_millis(25),
+        )
+    {
+        print_agent_env(&cfg.socket_path, read_pid_file(&pid_path), shell);
         return Ok(());
     }
 
     // Spawn detached background daemon with stdio redirected to /dev/null so `$(...)` never hangs.
+    // The daemon writes its own PID file only after binding the TCP port exclusively.
     let exe = env::current_exe()?;
     let mut child = Command::new(exe)
         .arg("run")
@@ -191,40 +211,142 @@ fn cmd_ssh_agent_mode(args: &[String]) -> io::Result<()> {
         .stderr(Stdio::null())
         .spawn()?;
 
-    let pid = child.id();
-    let _ = write_pid_file(&pid_path, pid);
+    let child_pid = child.id();
 
-    // Wait briefly (up to 600ms) for the Unix socket to become ready or report early startup errors.
-    for _ in 0..30 {
-        if is_socket_alive(&cfg.socket_path) {
-            break;
+    // Poll up to 2s (80 * 25ms) for the Unix socket to become ready. If our spawned child exits
+    // early (e.g. TCP/Unix socket AddrInUse because systemd or another shell started simultaneously),
+    // keep retrying until the winning instance's socket becomes connectable.
+    let outcome = wait_for_daemon_or_existing(
+        80,
+        Duration::from_millis(25),
+        || is_socket_alive(&cfg.socket_path),
+        || Ok(child.try_wait()?.map(|status| status.to_string())),
+    )?;
+
+    match outcome {
+        DaemonWaitOutcome::SocketReady { child_exited } => {
+            let daemon_pid =
+                read_pid_file(&pid_path).or(if child_exited { None } else { Some(child_pid) });
+            print_agent_env(&cfg.socket_path, daemon_pid, shell);
+            Ok(())
         }
-        if let Some(status) = child.try_wait()? {
-            let _ = fs::remove_file(&pid_path);
-            return Err(io::Error::other(format!(
-                "Bridge daemon exited early with {status} (check if port in {} is already in use)",
-                cfg.bind_addr
-            )));
+        DaemonWaitOutcome::StillStarting => {
+            let daemon_pid = read_pid_file(&pid_path).or(Some(child_pid));
+            print_agent_env(&cfg.socket_path, daemon_pid, shell);
+            Ok(())
         }
-        thread::sleep(Duration::from_millis(20));
+        DaemonWaitOutcome::ExitedWithoutSocket(status) => Err(io::Error::other(format!(
+            "Bridge daemon exited early with {status} and socket {} did not become ready \
+             (check if port in {} is already in use by another program)",
+            cfg.socket_path.display(),
+            cfg.bind_addr
+        ))),
     }
-
-    print_agent_env(&cfg.socket_path, pid, shell);
-    Ok(())
 }
 
-fn print_agent_env(socket_path: &Path, pid: u32, shell: ShellFormat) {
+#[derive(Debug, PartialEq, Eq)]
+enum DaemonWaitOutcome {
+    SocketReady { child_exited: bool },
+    StillStarting,
+    ExitedWithoutSocket(String),
+}
+
+fn wait_for_daemon_or_existing<FAlive, FWait>(
+    max_attempts: usize,
+    poll_interval: Duration,
+    mut check_socket_alive: FAlive,
+    mut try_wait_child: FWait,
+) -> io::Result<DaemonWaitOutcome>
+where
+    FAlive: FnMut() -> bool,
+    FWait: FnMut() -> io::Result<Option<String>>,
+{
+    let mut exited_status: Option<String> = None;
+    for attempt in 0..max_attempts {
+        if check_socket_alive() {
+            return Ok(DaemonWaitOutcome::SocketReady {
+                child_exited: exited_status.is_some(),
+            });
+        }
+        if exited_status.is_none() {
+            if let Some(status) = try_wait_child()? {
+                exited_status = Some(status);
+            }
+        }
+        if attempt + 1 < max_attempts {
+            thread::sleep(poll_interval);
+        }
+    }
+    if check_socket_alive() {
+        return Ok(DaemonWaitOutcome::SocketReady {
+            child_exited: exited_status.is_some(),
+        });
+    }
+    match exited_status {
+        Some(status) => Ok(DaemonWaitOutcome::ExitedWithoutSocket(status)),
+        None => Ok(DaemonWaitOutcome::StillStarting),
+    }
+}
+
+fn wait_until_socket_alive(socket_path: &Path, timeout: Duration, poll_interval: Duration) -> bool {
+    let mut elapsed = Duration::ZERO;
+    loop {
+        if is_socket_alive(socket_path) {
+            return true;
+        }
+        if elapsed >= timeout {
+            return false;
+        }
+        thread::sleep(poll_interval);
+        elapsed = elapsed.saturating_add(poll_interval);
+    }
+}
+
+fn is_systemd_unit_active_or_activating() -> bool {
+    #[cfg(unix)]
+    {
+        let output = Command::new("systemctl")
+            .args([
+                "--user",
+                "show",
+                "-p",
+                "ActiveState",
+                "--value",
+                "pixel-ssh-agent-bridge.service",
+            ])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output();
+        match output {
+            Ok(out) if out.status.success() => {
+                let state = String::from_utf8_lossy(&out.stdout);
+                matches!(state.trim(), "active" | "activating")
+            }
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+fn print_agent_env(socket_path: &Path, pid: Option<u32>, shell: ShellFormat) {
     let sock = socket_path.display();
     match shell {
         ShellFormat::Bourne => {
             println!("SSH_AUTH_SOCK={sock}; export SSH_AUTH_SOCK;");
-            println!("SSH_AGENT_PID={pid}; export SSH_AGENT_PID;");
-            println!("echo Agent pid {pid};");
+            if let Some(pid) = pid {
+                println!("SSH_AGENT_PID={pid}; export SSH_AGENT_PID;");
+                println!("echo Agent pid {pid};");
+            }
         }
         ShellFormat::Csh => {
             println!("setenv SSH_AUTH_SOCK {sock};");
-            println!("setenv SSH_AGENT_PID {pid};");
-            println!("echo Agent pid {pid};");
+            if let Some(pid) = pid {
+                println!("setenv SSH_AGENT_PID {pid};");
+                println!("echo Agent pid {pid};");
+            }
         }
     }
 }
@@ -235,6 +357,7 @@ fn pid_file_path(socket_path: &Path) -> PathBuf {
     PathBuf::from(os)
 }
 
+#[cfg(unix)]
 fn write_pid_file(pid_path: &Path, pid: u32) -> io::Result<()> {
     if let Some(parent) = pid_path.parent() {
         fs::create_dir_all(parent)?;
@@ -394,15 +517,8 @@ fn cmd_init(args: &[String]) -> io::Result<()> {
 fn cmd_print_env(args: &[String]) -> io::Result<()> {
     let config_path = parse_config_path(args)?;
     let cfg = BridgeConfig::load(&config_path)?;
-    let pid = read_pid_file(&pid_file_path(&cfg.socket_path)).unwrap_or(0);
-    if pid > 0 {
-        print_agent_env(&cfg.socket_path, pid, ShellFormat::Bourne);
-    } else {
-        println!(
-            "SSH_AUTH_SOCK={}; export SSH_AUTH_SOCK;",
-            cfg.socket_path.display()
-        );
-    }
+    let pid = read_pid_file(&pid_file_path(&cfg.socket_path)).filter(|&p| p > 0);
+    print_agent_env(&cfg.socket_path, pid, ShellFormat::Bourne);
     Ok(())
 }
 
@@ -458,26 +574,57 @@ fn cmd_run(args: &[String]) -> io::Result<()> {
 }
 
 fn run_foreground_server(cfg: BridgeConfig) -> io::Result<()> {
-    let hub = Arc::new(BridgeHub::new());
-    let tcp_hub = Arc::clone(&hub);
-    let bind_addr = cfg.bind_addr.clone();
-    let psk = cfg.psk;
-
-    thread::spawn(move || {
-        if let Err(e) = tunnel::run_tcp_listener(bind_addr, psk, tcp_hub) {
-            eprintln!("[bridge] Fatal TCP listener error: {e}");
-            process::exit(1);
-        }
-    });
+    // 1. Bind the TCP listener synchronously FIRST. The kernel enforces exclusive ownership of the
+    //    TCP port, guaranteeing a racing second instance exits cleanly with AddrInUse before ever
+    //    touching the live Unix socket or PID file.
+    let tcp_listener = tunnel::bind_tcp_listener(&cfg.bind_addr)?;
 
     #[cfg(unix)]
     {
-        unix_agent::run_unix_agent_server(&cfg.socket_path, hub)
+        let pid_path = pid_file_path(&cfg.socket_path);
+        if is_socket_alive(&cfg.socket_path) {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                format!(
+                    "Unix socket {} is already in use by a running bridge",
+                    cfg.socket_path.display()
+                ),
+            ));
+        }
+
+        // Write our PID before making the Unix socket connectable so callers polling
+        // `is_socket_alive` immediately observe the winning daemon's PID.
+        let my_pid = process::id();
+        let _ = write_pid_file(&pid_path, my_pid);
+
+        let unix_listener = match unix_agent::bind_unix_agent_socket(&cfg.socket_path) {
+            Ok(listener) => listener,
+            Err(e) => {
+                if read_pid_file(&pid_path) == Some(my_pid) {
+                    let _ = fs::remove_file(&pid_path);
+                }
+                return Err(e);
+            }
+        };
+
+        let hub = Arc::new(BridgeHub::new());
+        let tcp_hub = Arc::clone(&hub);
+        let psk = cfg.psk;
+
+        thread::spawn(move || {
+            if let Err(e) = tunnel::serve_tcp_listener(tcp_listener, psk, tcp_hub) {
+                eprintln!("[bridge] Fatal TCP listener error: {e}");
+                process::exit(1);
+            }
+        });
+
+        unix_agent::serve_unix_agent(unix_listener, hub)
     }
     #[cfg(not(unix))]
     {
+        let _ = tcp_listener;
         let _ = cfg.socket_path;
-        let _ = hub;
+        let _ = cfg.psk;
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "Unix domain SSH_AUTH_SOCK server requires Linux/Unix (run inside Pixel Debian VM)",
@@ -728,4 +875,79 @@ fn read_ssh_bytes(buf: &[u8], pos: &mut usize) -> io::Result<Vec<u8>> {
 fn write_ssh_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
     out.extend_from_slice(bytes);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wait_recovers_when_child_exits_early_and_racing_instance_binds_socket() {
+        let mut ticks = 0usize;
+        let outcome = wait_for_daemon_or_existing(
+            10,
+            Duration::from_millis(1),
+            || {
+                ticks += 1;
+                // Competing instance (e.g. systemd --user) finishes binding on tick 5.
+                ticks >= 5
+            },
+            || {
+                // Our spawned child immediately exits with AddrInUse on the first poll.
+                Ok(Some("exit status: 1".to_string()))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome,
+            DaemonWaitOutcome::SocketReady { child_exited: true }
+        );
+    }
+
+    #[test]
+    fn wait_reports_error_when_child_exits_and_socket_never_appears() {
+        let outcome = wait_for_daemon_or_existing(
+            5,
+            Duration::from_millis(1),
+            || false,
+            || Ok(Some("exit status: 1".to_string())),
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome,
+            DaemonWaitOutcome::ExitedWithoutSocket("exit status: 1".to_string())
+        );
+    }
+
+    #[test]
+    fn wait_succeeds_immediately_when_own_child_binds_socket() {
+        let mut ticks = 0usize;
+        let outcome = wait_for_daemon_or_existing(
+            10,
+            Duration::from_millis(1),
+            || {
+                ticks += 1;
+                ticks >= 2
+            },
+            || Ok(None),
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome,
+            DaemonWaitOutcome::SocketReady {
+                child_exited: false
+            }
+        );
+    }
+
+    #[test]
+    fn tcp_bind_enforces_exclusive_port_ownership() {
+        let first = tunnel::bind_tcp_listener("127.0.0.1:0").expect("ephemeral bind should work");
+        let addr = first.local_addr().unwrap().to_string();
+        let err = tunnel::bind_tcp_listener(&addr).expect_err("second bind must fail");
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
+    }
 }

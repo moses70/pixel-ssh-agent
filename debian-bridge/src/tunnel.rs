@@ -175,10 +175,18 @@ impl BridgeHub {
     }
 }
 
-pub fn run_tcp_listener(bind_addr: String, psk: [u8; 32], hub: Arc<BridgeHub>) -> io::Result<()> {
-    let listener = TcpListener::bind(&bind_addr)?;
+pub fn bind_tcp_listener(bind_addr: &str) -> io::Result<TcpListener> {
+    let listener = TcpListener::bind(bind_addr)?;
     eprintln!("[bridge] Listening for Android PSA1 tunnel on TCP {bind_addr}");
+    Ok(listener)
+}
 
+#[allow(dead_code)]
+pub fn serve_tcp_listener(
+    listener: TcpListener,
+    psk: [u8; 32],
+    hub: Arc<BridgeHub>,
+) -> io::Result<()> {
     for incoming in listener.incoming() {
         match incoming {
             Ok(stream) => {

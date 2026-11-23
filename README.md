@@ -148,6 +148,8 @@ systemctl --user daemon-reload
 systemctl --user enable --now pixel-ssh-agent-bridge.service
 ```
 
+To export `SSH_AUTH_SOCK` in your shell when running via `systemd --user`, add either `eval "$(pixel-ssh-agent-bridge print-env)"` or `eval "$(pixel-ssh-agent-bridge)" >/dev/null` to `~/.bashrc` (the CLI detects an active or starting `systemd --user` service and waits for its socket rather than starting a duplicate daemon).
+
 ### 6. Optional: Agent "borrow" for a next level of agent forwarding
 
 Agent forwarding is very nice when the agent lives on you main workstation. But with pixel-ssh-agent,
